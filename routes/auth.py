@@ -54,6 +54,7 @@ async def login(user_credentials: UserLogin):
     
     access_token = create_access_token(data={"sub": user['email']})
     return {
+        "message": "Login successful, Welcome!",
         "access_token": access_token, 
         "token_type": "bearer",
         "user_id": str(user["_id"]),
