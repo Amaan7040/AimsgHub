@@ -192,12 +192,7 @@ async def get_api_info():
             "api_keys_rotate": "/api-keys/rotate - Rotate keys manually"
         },
         "scopes": [
-            "campaign_create", "campaign_read", "campaign_update", "campaign_delete",
-            "message_send", "message_read",
-            "auto_reply_create", "auto_reply_read", "auto_reply_update", "auto_reply_delete",
-            "template_create", "template_read", "template_update", "template_delete",
-            "contacts_upload", "contacts_read",
-            "reports_read", "statistics_read"
+            "whatsapp_marketing"
         ]
     }
 
