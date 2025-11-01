@@ -12,6 +12,6 @@ class ChatTestInput(BaseModel):
 
 class CampaignCreate(BaseModel):
     name: str
-    message: str
+    message: Optional[str]
     campaign_type: str
-    contacts: List[str]
+    contacts: Optional[List[str]]

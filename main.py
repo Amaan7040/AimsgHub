@@ -14,7 +14,9 @@ from routes.whatsapp import router as whatsapp_router
 from routes.campaigns import router as campaigns_router
 from routes.chatbot import router as chatbot_router
 from routes.analytics import router as analytics_router
-from routes.api_keys import router as api_keys_router  # NEW: Import API keys router
+from routes.api_keys import router as api_keys_router 
+# from routes.devices import router as devices_router
+# from routes.whatsapp_device import router as whatsapp_device_router
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -37,7 +39,14 @@ async def lifespan(app: FastAPI):
         users_collection = await get_users_collection()
         await users_collection.create_index("email", unique=True)
         await users_collection.create_index("created_at")
-        
+
+        devices_collection = mongodb.db.devices
+        await devices_collection.create_index("user_id")
+        await devices_collection.create_index("instance_id", unique=True)
+        await devices_collection.create_index([("user_id", 1), ("name", 1)], unique=True)
+        await devices_collection.create_index("created_at")
+        await devices_collection.create_index("status")
+                
         campaigns_collection = await get_campaigns_collection()
         await campaigns_collection.create_index("owner_id")
         await campaigns_collection.create_index("sent_at")
@@ -106,11 +115,13 @@ app.include_router(whatsapp_router)
 app.include_router(campaigns_router)
 app.include_router(chatbot_router)
 app.include_router(analytics_router)
-app.include_router(api_keys_router)  # NEW: Include API keys router
+app.include_router(api_keys_router)  
+# app.include_router(devices_router)
+# app.include_router(whatsapp_device_router)
 
 @app.get("/")
 async def serve_frontend():
-    return "Welcome to AiMsgHub! Visit /docs for API documentation."
+    return "Welcome to AiMsgHub! Visit /docs for API Endpoints and docs."
 
 @app.get("/images/{image_name}")
 async def serve_image(image_name: str):

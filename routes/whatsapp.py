@@ -263,67 +263,19 @@ async def verify_webhook(request: Request):
         return Response(content=request.query_params.get("hub.challenge"), status_code=200)
     raise HTTPException(status_code=403, detail="Verification token mismatch")
 
-# ==================== NEW WHATSAPP MARKETING ROUTES WITH API KEY VALIDATION ====================
+# ==================== UPDATED WHATSAPP MARKETING ROUTES WITH SINGLE API KEY ====================
 
-# Create dependency functions for each scope
-async def require_campaign_create(x_api_key: str = Header(None)):
-    return await validate_api_key("campaign_create", x_api_key)
-
-async def require_campaign_read(x_api_key: str = Header(None)):
-    return await validate_api_key("campaign_read", x_api_key)
-
-async def require_campaign_update(x_api_key: str = Header(None)):
-    return await validate_api_key("campaign_update", x_api_key)
-
-async def require_campaign_delete(x_api_key: str = Header(None)):
-    return await validate_api_key("campaign_delete", x_api_key)
-
-async def require_message_send(x_api_key: str = Header(None)):
-    return await validate_api_key("message_send", x_api_key)
-
-async def require_message_read(x_api_key: str = Header(None)):
-    return await validate_api_key("message_read", x_api_key)
-
-async def require_auto_reply_create(x_api_key: str = Header(None)):
-    return await validate_api_key("auto_reply_create", x_api_key)
-
-async def require_auto_reply_read(x_api_key: str = Header(None)):
-    return await validate_api_key("auto_reply_read", x_api_key)
-
-async def require_auto_reply_update(x_api_key: str = Header(None)):
-    return await validate_api_key("auto_reply_update", x_api_key)
-
-async def require_auto_reply_delete(x_api_key: str = Header(None)):
-    return await validate_api_key("auto_reply_delete", x_api_key)
-
-async def require_template_create(x_api_key: str = Header(None)):
-    return await validate_api_key("template_create", x_api_key)
-
-async def require_template_read(x_api_key: str = Header(None)):
-    return await validate_api_key("template_read", x_api_key)
-
-async def require_template_update(x_api_key: str = Header(None)):
-    return await validate_api_key("template_update", x_api_key)
-
-async def require_template_delete(x_api_key: str = Header(None)):
-    return await validate_api_key("template_delete", x_api_key)
-
-async def require_contacts_upload(x_api_key: str = Header(None)):
-    return await validate_api_key("contacts_upload", x_api_key)
-
-async def require_statistics_read(x_api_key: str = Header(None)):
-    return await validate_api_key("statistics_read", x_api_key)
-
-async def require_reports_read(x_api_key: str = Header(None)):
-    return await validate_api_key("reports_read", x_api_key)
+# Single dependency function for all WhatsApp marketing features
+async def require_whatsapp_marketing(x_api_key: str = Header(None)):
+    return await validate_api_key("whatsapp_marketing", x_api_key)
 
 # Campaign Management
 @router.post("/campaigns")
 async def create_campaign(
     campaign_data: dict, 
-    current_user: dict = Depends(require_campaign_create)
+    current_user: dict = Depends(require_whatsapp_marketing)
 ):
-    """Create new WhatsApp campaign - requires campaign_create key"""
+    """Create new WhatsApp campaign - requires whatsapp_marketing key"""
     campaigns_collection = await get_whatsapp_campaigns_collection()
     
     # Validate required fields
@@ -337,7 +289,7 @@ async def create_campaign(
         "user_id": current_user["_id"],
         "name": campaign_data["name"],  
         "type": campaign_data["type"],  
-        "status": "draft",
+        "status": campaign_data.get("status", "inactive"),
         "message_type": campaign_data.get("message_type", "Text Only"),
         "message_content": campaign_data.get("message_content", ""),
         "media_url": campaign_data.get("media_url", ""),
@@ -407,9 +359,9 @@ def safe_convert_document(doc):
 # Updated GET /whatsapp/campaigns endpoint
 @router.get("/campaigns")
 async def get_campaigns(
-    current_user: dict = Depends(require_campaign_read)
+    current_user: dict = Depends(require_whatsapp_marketing)
 ):
-    """Get user's WhatsApp campaigns - requires campaign_read key"""
+    """Get user's WhatsApp campaigns - requires whatsapp_marketing key"""
     try:
         campaigns_collection = await get_whatsapp_campaigns_collection()
         
@@ -445,29 +397,35 @@ async def get_campaigns(
 async def update_campaign(
     campaign_id: str,
     campaign_data: dict, 
-    current_user: dict = Depends(require_campaign_update)
+    current_user: dict = Depends(require_whatsapp_marketing)
 ):
-    """Update WhatsApp campaign - requires campaign_update key"""
+    """Update WhatsApp campaign - requires whatsapp_marketing key"""
     campaigns_collection = await get_whatsapp_campaigns_collection()
     
-    # Build update fields
-    update_fields = {}
-    if "name" in campaign_data:
-        update_fields["name"] = campaign_data["name"]
-    if "type" in campaign_data:
-        update_fields["type"] = campaign_data["type"]
-    if "status" in campaign_data:
-        update_fields["status"] = campaign_data["status"]
-    if "message_type" in campaign_data:
-        update_fields["message_type"] = campaign_data["message_type"]
-    if "message_content" in campaign_data:
-        update_fields["message_content"] = campaign_data["message_content"]
-    if "media_url" in campaign_data:
-        update_fields["media_url"] = campaign_data["media_url"]
-    if "caption" in campaign_data:
-        update_fields["caption"] = campaign_data["caption"]
+    # Validate required fields
+    if "name" not in campaign_data:
+        raise HTTPException(status_code=400, detail="Campaign name is required")
     
-    update_fields["updated_at"] = datetime.now(timezone.utc)
+    if "type" not in campaign_data:
+        raise HTTPException(status_code=400, detail="Campaign type is required")
+    
+    # Build update fields - only include fields that are provided
+    update_fields = {
+        "name": campaign_data["name"],
+        "type": campaign_data["type"],
+        "updated_at": datetime.now(timezone.utc)
+    }
+    
+    # Optional fields - only update if provided
+    optional_fields = [
+        "status", "message_type", "message_content", 
+        "media_url", "caption", "contacts",
+        "sent_count", "failed_count"
+    ]
+    
+    for field in optional_fields:
+        if field in campaign_data:
+            update_fields[field] = campaign_data[field]
     
     result = await campaigns_collection.update_one(
         {"_id": ObjectId(campaign_id), "user_id": current_user["_id"]},
@@ -482,9 +440,9 @@ async def update_campaign(
 @router.delete("/campaigns/{campaign_id}")
 async def delete_campaign(
     campaign_id: str, 
-    current_user: dict = Depends(require_campaign_delete)
+    current_user: dict = Depends(require_whatsapp_marketing)
 ):
-    """Delete WhatsApp campaign - requires campaign_delete key"""
+    """Delete WhatsApp campaign - requires whatsapp_marketing key"""
     campaigns_collection = await get_whatsapp_campaigns_collection()
     
     result = await campaigns_collection.delete_one(
@@ -500,9 +458,9 @@ async def delete_campaign(
 @router.post("/auto-replies")
 async def create_auto_reply(
     auto_reply_data: dict, 
-    current_user: dict = Depends(require_auto_reply_create)
+    current_user: dict = Depends(require_whatsapp_marketing)
 ):
-    """Create auto-reply rule - requires auto_reply_create key"""
+    """Create auto-reply rule - requires whatsapp_marketing key"""
     auto_replies_collection = await get_whatsapp_auto_replies_collection()
 
     if not auto_reply_data.get("keyword"):
@@ -534,9 +492,9 @@ async def create_auto_reply(
 
 @router.get("/auto-replies")
 async def get_auto_replies(
-    current_user: dict = Depends(require_auto_reply_read)
+    current_user: dict = Depends(require_whatsapp_marketing)
 ):
-    """Get user's auto-reply rules - requires auto_reply_read key"""
+    """Get user's auto-reply rules - requires whatsapp_marketing key"""
     try:
         auto_replies_collection = await get_whatsapp_auto_replies_collection()
         
@@ -572,9 +530,9 @@ async def get_auto_replies(
 async def update_auto_reply(
     auto_reply_id: str, 
     auto_reply_data: dict, 
-    current_user: dict = Depends(require_auto_reply_update)
+    current_user: dict = Depends(require_whatsapp_marketing)
 ):
-    """Update auto-reply rule - requires auto_reply_update key"""
+    """Update auto-reply rule - requires whatsapp_marketing key"""
     auto_replies_collection = await get_whatsapp_auto_replies_collection()
     
     result = await auto_replies_collection.update_one(
@@ -590,9 +548,9 @@ async def update_auto_reply(
 @router.delete("/auto-replies/{auto_reply_id}")
 async def delete_auto_reply(
     auto_reply_id: str, 
-    current_user: dict = Depends(require_auto_reply_delete)
+    current_user: dict = Depends(require_whatsapp_marketing)
 ):
-    """Delete auto-reply rule - requires auto_reply_delete key"""
+    """Delete auto-reply rule - requires whatsapp_marketing key"""
     auto_replies_collection = await get_whatsapp_auto_replies_collection()
     
     result = await auto_replies_collection.delete_one(
@@ -608,9 +566,9 @@ async def delete_auto_reply(
 @router.post("/send-message")
 async def send_bulk_message(
     message_data: dict, 
-    current_user: dict = Depends(require_message_send)
+    current_user: dict = Depends(require_whatsapp_marketing)
 ):
-    """Send bulk WhatsApp messages - requires message_send key"""
+    """Send bulk WhatsApp messages - requires whatsapp_marketing key"""
     if not current_user.get('phone_number_id') or not current_user.get('meta_api_key'):
         raise HTTPException(status_code=400, detail="WhatsApp not connected")
     
@@ -693,9 +651,9 @@ async def send_bulk_message(
 # Statistics and Analytics
 @router.get("/statistics/overview")
 async def get_statistics_overview(
-    current_user: dict = Depends(require_statistics_read)
+    current_user: dict = Depends(require_whatsapp_marketing)
 ):
-    """Get WhatsApp marketing overview statistics - requires statistics_read key"""
+    """Get WhatsApp marketing overview statistics - requires whatsapp_marketing key"""
     campaigns_collection = await get_whatsapp_campaigns_collection()
     
     # Calculate totals
@@ -728,14 +686,14 @@ async def get_statistics_overview(
 
 @router.get("/send-message")
 async def get_message_history(
-    current_user: dict = Depends(require_message_read),
+    current_user: dict = Depends(require_whatsapp_marketing),
     limit: int = Query(10, ge=1, le=100),
     skip: int = Query(0, ge=0),
     campaign_name: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     days: Optional[int] = Query(30, ge=1, le=365)
 ):
-    """Get message sending history with filtering - requires message_send key"""
+    """Get message sending history with filtering - requires whatsapp_marketing key"""
     try:
         campaigns_collection = await get_whatsapp_campaigns_collection()
         
@@ -808,9 +766,9 @@ async def get_message_history(
 @router.get("/statistics/message-trends")
 async def get_message_trends(
     days: int = 7, 
-    current_user: dict = Depends(require_statistics_read)
+    current_user: dict = Depends(require_whatsapp_marketing)
 ):
-    """Get message trends for charts - requires statistics_read key"""
+    """Get message trends for charts - requires whatsapp_marketing key"""
     # Mock data matching frontend structure - replace with actual aggregation
     return [
         {"date": "Oct 01", "messages": 320},
@@ -826,9 +784,9 @@ async def get_message_trends(
 @router.post("/templates")
 async def create_template(
     template_data: dict, 
-    current_user: dict = Depends(require_template_create)
+    current_user: dict = Depends(require_whatsapp_marketing)
 ):
-    """Create WhatsApp template - requires template_create key"""
+    """Create WhatsApp template - requires whatsapp_marketing key"""
     templates_collection = await get_whatsapp_templates_collection()
     
     template = {
@@ -849,9 +807,9 @@ async def create_template(
 
 @router.get("/templates")
 async def get_templates(
-    current_user: dict = Depends(require_template_read)
+    current_user: dict = Depends(require_whatsapp_marketing)
 ):
-    """Get user's WhatsApp templates - requires template_read key"""
+    """Get user's WhatsApp templates - requires whatsapp_marketing key"""
     try:
         templates_collection = await get_whatsapp_templates_collection()
         
@@ -887,9 +845,9 @@ async def get_templates(
 async def update_template(
     template_id: str, 
     template_data: dict, 
-    current_user: dict = Depends(require_template_update)
+    current_user: dict = Depends(require_whatsapp_marketing)
 ):
-    """Update WhatsApp template - requires template_update key"""
+    """Update WhatsApp template - requires whatsapp_marketing key"""
     templates_collection = await get_whatsapp_templates_collection()
     
     result = await templates_collection.update_one(
@@ -905,9 +863,9 @@ async def update_template(
 @router.delete("/templates/{template_id}")
 async def delete_template(
     template_id: str, 
-    current_user: dict = Depends(require_template_delete)
+    current_user: dict = Depends(require_whatsapp_marketing)
 ):
-    """Delete WhatsApp template - requires template_delete key"""
+    """Delete WhatsApp template - requires whatsapp_marketing key"""
     templates_collection = await get_whatsapp_templates_collection()
     
     result = await templates_collection.delete_one(
@@ -923,9 +881,9 @@ async def delete_template(
 @router.post("/contacts/upload")
 async def upload_contacts(
     contacts_data: dict, 
-    current_user: dict = Depends(require_contacts_upload)
+    current_user: dict = Depends(require_whatsapp_marketing)
 ):
-    """Upload and validate contacts - requires contacts_upload key"""
+    """Upload and validate contacts - requires whatsapp_marketing key"""
     contacts_collection = await get_whatsapp_contacts_collection()
     
     operations = []
@@ -1005,7 +963,7 @@ async def upload_contacts(
 @router.post("/contacts/check-duplicates")
 async def check_duplicate_contacts(
     contacts_data: dict, 
-    current_user: dict = Depends(require_contacts_upload)
+    current_user: dict = Depends(require_whatsapp_marketing)
 ):
     """Check which contacts already exist before uploading"""
     contacts_collection = await get_whatsapp_contacts_collection()
@@ -1043,9 +1001,9 @@ async def check_duplicate_contacts(
 @router.get("/reports/campaign/{campaign_id}")
 async def get_campaign_report(
     campaign_id: str, 
-    current_user: dict = Depends(require_reports_read)
+    current_user: dict = Depends(require_whatsapp_marketing)
 ):
-    """Get detailed campaign report - requires reports_read key"""
+    """Get detailed campaign report - requires whatsapp_marketing key"""
     campaigns_collection = await get_whatsapp_campaigns_collection()
     
     campaign = await campaigns_collection.find_one({
@@ -1112,11 +1070,11 @@ async def debug_headers(request: Request):
 
 # New endpoint to test API key validation
 @router.get("/test-api-key")
-async def test_api_key(current_user: dict = Depends(require_campaign_read)):
+async def test_api_key(current_user: dict = Depends(require_whatsapp_marketing)):
     """Test endpoint to verify API key validation is working"""
     return {
         "status": "API key validation successful!",
         "user_id": str(current_user["_id"]),
         "email": current_user["email"],
-        "message": "Your API key has the required permissions for campaign read operations."
+        "message": "Your API key has the required permissions for all WhatsApp marketing operations."
     }

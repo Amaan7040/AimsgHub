@@ -7,13 +7,7 @@ load_dotenv()
 API_KEYS_COLLECTION = "api_keys"
 API_KEY_EXPIRY_HOURS = 3
 API_KEY_SCOPES = [
-    "campaign_create", "campaign_read", "campaign_update", "campaign_delete",
-    "message_send", "message_read",
-    "auto_reply_create", "auto_reply_read", "auto_reply_update", "auto_reply_delete",
-    "template_create", "template_read", "template_update", "template_delete",
-    "contacts_upload", "contacts_read",
-    "reports_read", "statistics_read",
-    "whatsapp_connect", "whatsapp_webhook"
+    "whatsapp_marketing"
 ]
 
 # MongoDB Configuration
