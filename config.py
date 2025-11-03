@@ -7,7 +7,7 @@ load_dotenv()
 API_KEYS_COLLECTION = "api_keys"
 API_KEY_EXPIRY_HOURS = 3
 API_KEY_SCOPES = [
-    "whatsapp_marketing"
+    "whatsapp_marketing", "device_management"
 ]
 
 # MongoDB Configuration

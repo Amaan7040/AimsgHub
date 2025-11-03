@@ -54,8 +54,8 @@ async def get_api_keys_collection():
     return db[API_KEYS_COLLECTION]
 
 async def get_devices_collection():
-    from .database import mongodb
-    return mongodb.db.devices
+    db = await get_database()
+    return db.devices
 
 @asynccontextmanager
 async def lifespan_manager(app: FastAPI):

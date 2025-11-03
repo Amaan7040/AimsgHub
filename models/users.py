@@ -24,15 +24,18 @@ class UserCreate(BaseModel):
 
     @validator('mobile_number')
     def validate_mobile_number(cls, v):
-        cleaned = re.sub(r'[\s-]', '', v)
-        if cleaned.startswith('+91'):
-            if len(cleaned) != 13 or not cleaned[1:].isdigit():
-                raise ValueError('Invalid Indian mobile number format')
-        elif len(cleaned) == 10 and cleaned.isdigit():
-            cleaned = '+91' + cleaned
-        else:
-            raise ValueError('Only Indian mobile numbers (+91) are supported')
-        return cleaned
+        cleaned = re.sub(r'[\s\-\(\)\.\+]', '', v)
+        
+        if not cleaned.isdigit():
+            raise ValueError('Mobile number must contain only digits (plus optional spaces, dashes, parentheses, dots, or +)')
+        
+        if len(cleaned) < 7:
+            raise ValueError('Mobile number is too short (minimum 7 digits)')
+        if len(cleaned) > 15:
+            raise ValueError('Mobile number is too long (maximum 15 digits)')
+        
+        return v  
+
 
 class UserResponse(BaseMongoModel):
     id: str = Field(alias='_id')

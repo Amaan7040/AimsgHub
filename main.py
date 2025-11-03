@@ -15,7 +15,7 @@ from routes.campaigns import router as campaigns_router
 from routes.chatbot import router as chatbot_router
 from routes.analytics import router as analytics_router
 from routes.api_keys import router as api_keys_router 
-# from routes.devices import router as devices_router
+from routes.devices import router as devices_router
 # from routes.whatsapp_device import router as whatsapp_device_router
 
 # Configure logging
@@ -116,7 +116,7 @@ app.include_router(campaigns_router)
 app.include_router(chatbot_router)
 app.include_router(analytics_router)
 app.include_router(api_keys_router)  
-# app.include_router(devices_router)
+app.include_router(devices_router)
 # app.include_router(whatsapp_device_router)
 
 @app.get("/")
@@ -192,12 +192,7 @@ async def get_api_info():
             "api_keys_rotate": "/api-keys/rotate - Rotate keys manually"
         },
         "scopes": [
-            "campaign_create", "campaign_read", "campaign_update", "campaign_delete",
-            "message_send", "message_read",
-            "auto_reply_create", "auto_reply_read", "auto_reply_update", "auto_reply_delete",
-            "template_create", "template_read", "template_update", "template_delete",
-            "contacts_upload", "contacts_read",
-            "reports_read", "statistics_read"
+            "whatsapp_marketing"
         ]
     }
 

@@ -286,7 +286,7 @@ async def create_campaign(
         raise HTTPException(status_code=400, detail="Campaign type is required")
     
     campaign = {
-        "user_id": current_user["_id"],
+        "user_id": ObjectId(current_user["_id"]),
         "name": campaign_data["name"],  
         "type": campaign_data["type"],  
         "status": campaign_data.get("status", "inactive"),
@@ -365,10 +365,7 @@ async def get_campaigns(
     try:
         campaigns_collection = await get_whatsapp_campaigns_collection()
         
-        # Convert user_id to ObjectId for query
-        user_object_id = ObjectId(current_user["_id"])
-        
-        campaigns_cursor = campaigns_collection.find({"user_id": user_object_id})
+        campaigns_cursor = campaigns_collection.find({"user_id": current_user["_id"]})
         campaigns = await campaigns_cursor.to_list(length=100)
         
         logger.info(f"Found {len(campaigns)} campaigns for user {current_user['_id']}")
@@ -473,7 +470,7 @@ async def create_auto_reply(
         raise HTTPException(status_code=400, detail="Message content is required")
     
     auto_reply = {
-        "user_id": current_user["_id"],
+        "user_id": ObjectId(current_user["_id"]),
         "keyword": auto_reply_data["keyword"],
         "instances": auto_reply_data.get("instances", []),
         "message_type": auto_reply_data["message_type"],
@@ -498,10 +495,7 @@ async def get_auto_replies(
     try:
         auto_replies_collection = await get_whatsapp_auto_replies_collection()
         
-        # Convert user_id to ObjectId for query
-        user_object_id = ObjectId(current_user["_id"])
-        
-        auto_replies_cursor = auto_replies_collection.find({"user_id": user_object_id})
+        auto_replies_cursor = auto_replies_collection.find({"user_id": current_user["_id"]})
         auto_replies = await auto_replies_cursor.to_list(length=100)
         
         logger.info(f"Found {len(auto_replies)} auto-replies for user {current_user['_id']}")
@@ -790,7 +784,7 @@ async def create_template(
     templates_collection = await get_whatsapp_templates_collection()
     
     template = {
-        "user_id": current_user["_id"],
+        "user_id": ObjectId(current_user["_id"]),
         "name": template_data["name"],
         "type": template_data["type"],
         "content": template_data["content"],
@@ -813,10 +807,7 @@ async def get_templates(
     try:
         templates_collection = await get_whatsapp_templates_collection()
         
-        # Convert user_id to ObjectId for query
-        user_object_id = ObjectId(current_user["_id"])
-        
-        templates_cursor = templates_collection.find({"user_id": user_object_id})
+        templates_cursor = templates_collection.find({"user_id": current_user["_id"]})
         templates = await templates_cursor.to_list(length=100)
         
         logger.info(f"Found {len(templates)} templates for user {current_user['_id']}")
@@ -899,7 +890,7 @@ async def upload_contacts(
                 
             # Create filter and update operation
             filter_query = {
-                "user_id": current_user["_id"],
+                "user_id": ObjectId(current_user["_id"]),
                 "number": number
             }
             
