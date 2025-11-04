@@ -6,6 +6,7 @@ load_dotenv()
 # API Key Configuration
 API_KEYS_COLLECTION = "api_keys"
 API_KEY_EXPIRY_HOURS = 3
+API_KEY_AUTO_ROTATE_HOURS = 2.5
 API_KEY_SCOPES = [
     "whatsapp_marketing", "device_management"
 ]
@@ -29,6 +30,7 @@ META_REDIRECT_URI = os.getenv("META_REDIRECT_URI")
 # Application Configuration
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 180
+REFRESH_TOKEN_EXPIRE_DAYS = 10
 VECTOR_STORE_DIR = "user_vector_stores"
 WHATSAPP_API_URL = "https://graph.facebook.com/v19.0"
 SG_BASE = "https://api.sendgrid.com/v3"

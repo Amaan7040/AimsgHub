@@ -16,7 +16,7 @@ from routes.chatbot import router as chatbot_router
 from routes.analytics import router as analytics_router
 from routes.api_keys import router as api_keys_router 
 from routes.devices import router as devices_router
-# from routes.whatsapp_device import router as whatsapp_device_router
+from services.token_refresh_middleware import token_refresh_middleware
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -35,10 +35,17 @@ async def lifespan(app: FastAPI):
         await mongodb.client.admin.command('ping')
         logger.info("Successfully connected to MongoDB!")
         
-        # Create indexes for existing collections
         users_collection = await get_users_collection()
         await users_collection.create_index("email", unique=True)
         await users_collection.create_index("created_at")
+
+        refresh_tokens_collection = mongodb.db.refresh_tokens
+        await refresh_tokens_collection.create_index("user_id")
+        await refresh_tokens_collection.create_index("refresh_token", unique=True)
+        await refresh_tokens_collection.create_index("expires_at", expireAfterSeconds=0)  
+        await refresh_tokens_collection.create_index([("user_id", 1), ("is_revoked", 1)])
+        await refresh_tokens_collection.create_index("created_at")
+        logger.info("Refresh tokens collection indexes created")
 
         devices_collection = mongodb.db.devices
         await devices_collection.create_index("user_id")
@@ -55,7 +62,6 @@ async def lifespan(app: FastAPI):
         await email_users_collection.create_index("user_id", unique=True)
         await email_users_collection.create_index("username", unique=True)
         
-        # Create indexes for new WhatsApp marketing collections
         whatsapp_campaigns = mongodb.db.whatsapp_campaigns
         await whatsapp_campaigns.create_index("user_id")
         await whatsapp_campaigns.create_index("created_at")
@@ -74,7 +80,6 @@ async def lifespan(app: FastAPI):
         await whatsapp_contacts.create_index("user_id")
         await whatsapp_contacts.create_index([("user_id", 1), ("number", 1)], unique=True)
         
-        # NEW: Create indexes for API keys collection
         api_keys_collection = await get_api_keys_collection()
         await api_keys_collection.create_index("user_id", unique=True)
         await api_keys_collection.create_index("last_rotated")
@@ -117,7 +122,9 @@ app.include_router(chatbot_router)
 app.include_router(analytics_router)
 app.include_router(api_keys_router)  
 app.include_router(devices_router)
-# app.include_router(whatsapp_device_router)
+@app.middleware("http")
+async def auto_token_refresh_middleware(request: Request, call_next):
+    return await token_refresh_middleware(request, call_next)
 
 @app.get("/")
 async def serve_frontend():

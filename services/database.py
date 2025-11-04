@@ -57,6 +57,10 @@ async def get_devices_collection():
     db = await get_database()
     return db.devices
 
+async def get_refresh_tokens_collection():
+    db = await get_database()
+    return db.refresh_tokens
+
 @asynccontextmanager
 async def lifespan_manager(app: FastAPI):
     # Startup

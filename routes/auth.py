@@ -1,8 +1,10 @@
-from fastapi import APIRouter, HTTPException, status, Header
-from models.users import UserCreate, UserResponse, UserLogin, Token
+from fastapi import APIRouter, HTTPException, status, Header, Depends
+from models.users import UserCreate, UserResponse, UserLogin
+from models.tokens import Token, TokenRefresh  
 from services.database import get_users_collection
 from services.auth import get_current_user, authenticate_user
-from utils.security import get_password_hash, create_access_token
+from services.token_service import TokenService  
+from utils.security import get_password_hash
 from datetime import datetime, timezone
 import logging
 
@@ -52,11 +54,38 @@ async def login(user_credentials: UserLogin):
     if not user:
         raise HTTPException(status_code=401, detail="Incorrect email or password")
     
-    access_token = create_access_token(data={"sub": user['email']})
+    # Use TokenService to create both tokens
+    tokens = await TokenService.create_tokens_for_user(user)
+    
     return {
         "message": "Login successful, Welcome!",
-        "access_token": access_token, 
-        "token_type": "bearer",
+        "access_token": tokens["access_token"],
+        "refresh_token": tokens["refresh_token"], 
+        "token_type": tokens["token_type"],
         "user_id": str(user["_id"]),
-        "email": user["email"]
+        "email": user["email"],
+        "expires_in": tokens["expires_in"]
     }
+
+@router.post("/refresh", response_model=dict)
+async def refresh_token(token_data: TokenRefresh):
+    """Refresh access token using refresh token"""
+    tokens = await TokenService.refresh_access_token(token_data.refresh_token)
+    
+    return {
+        "message": "Token refreshed successfully",
+        "access_token": tokens["access_token"],
+        "token_type": tokens["token_type"],
+        "expires_in": tokens["expires_in"]
+    }
+
+@router.post("/logout")
+async def logout(refresh_token: str = None, current_user: dict = Depends(get_current_user)):
+    """Logout user and revoke tokens"""
+    if refresh_token:
+        await TokenService.revoke_refresh_token(refresh_token)
+    else:
+        # Revoke all user tokens
+        await TokenService.revoke_all_user_tokens(str(current_user["_id"]))
+    
+    return {"message": "Successfully logged out"}
