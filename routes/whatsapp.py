@@ -4,6 +4,8 @@ from services.auth import get_current_user, validate_api_key
 from services.vector_store import load_vector_store_safely, close_vector_store, create_advanced_retriever
 from services.generate_message import call_gemini_api
 from services.whatsapp_service import send_whatsapp_message, send_whatsapp_media, send_whatsapp_interactive
+from models.campaigns import IdeaInput
+from routes.campaigns import generate_message_from_idea
 from utils.embeddings import embedding_model
 from config import META_API_VERIFY_TOKEN, WHATSAPP_API_URL, GROQ_API_KEY
 from bson import ObjectId
@@ -451,6 +453,84 @@ async def delete_campaign(
     
     return {"success": True}
 
+@router.post("/knowledge-base/upload-replace")
+async def upload_replace_knowledge_base(
+    file: UploadFile = File(...),
+    current_user: dict = Depends(require_whatsapp_marketing)
+):
+    """Replace entire knowledge base with a single file (PDF, DOCX, TXT)"""
+    from services.knowledge_base_service import update_replace_user_knowledge_base_service 
+    from services.database import get_users_collection
+    
+    # Validate file type
+    allowed_types = ['.pdf', '.docx', '.doc', '.txt']
+    file_ext = '.' + file.filename.lower().split('.')[-1]
+    
+    if file_ext not in allowed_types:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"File type not supported. Allowed: {', '.join(allowed_types)}"
+        )
+    
+    users_collection = await get_users_collection()
+    result = await update_replace_user_knowledge_base_service(current_user["_id"], file, users_collection)
+    
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result["error"])
+    
+    return result
+
+@router.get("/knowledge-base/status")
+async def get_knowledge_base_status(
+    current_user: dict = Depends(require_whatsapp_marketing)
+):
+    """Get current knowledge base status"""
+    from services.database import get_users_collection
+    
+    users_collection = await get_users_collection()
+    user = await users_collection.find_one({"_id": ObjectId(current_user["_id"])})
+    
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    return {
+        "has_knowledge_base": bool(user.get('vector_store_path')),
+        "current_file": user.get('knowledge_base_file'),
+        "last_updated": user.get('knowledge_base_updated'),
+        "documents_count": user.get('documents_count', 0)
+    }
+
+@router.delete("/knowledge-base/clear")
+async def clear_knowledge_base(
+    current_user: dict = Depends(require_whatsapp_marketing)
+):
+    """Clear user's knowledge base"""
+    from services.database import get_users_collection
+    import shutil
+    import os
+    
+    users_collection = await get_users_collection()
+    user = await users_collection.find_one({"_id": ObjectId(current_user["_id"])})
+    
+    if user and user.get('vector_store_path'):
+        # Delete vector store files
+        vector_store_dir = os.path.dirname(user['vector_store_path'])
+        if os.path.exists(vector_store_dir):
+            shutil.rmtree(vector_store_dir)
+    
+    # Update user in database
+    await users_collection.update_one(
+        {"_id": ObjectId(current_user["_id"])},
+        {"$unset": {
+            "vector_store_path": "",
+            "knowledge_base_file": "",
+            "knowledge_base_updated": "",
+            "documents_count": ""
+        }}
+    )
+    
+    return {"success": True, "message": "Knowledge base cleared successfully"}
+
 # Auto Reply Management
 @router.post("/auto-replies")
 async def create_auto_reply(
@@ -562,43 +642,110 @@ async def send_bulk_message(
     message_data: dict, 
     current_user: dict = Depends(require_whatsapp_marketing)
 ):
-    """Send bulk WhatsApp messages - requires whatsapp_marketing key"""
-    if not current_user.get('phone_number_id') or not current_user.get('meta_api_key'):
-        raise HTTPException(status_code=400, detail="WhatsApp not connected")
+    """Send bulk WhatsApp messages with only Template and AI options - requires whatsapp_marketing key"""
     
-    contacts = message_data["contacts"]
-    message_content = message_data["message_content"]
-    message_type = message_data["message_type"]
-    campaign_name = message_data["campaign_name"]
+    # Extract common fields
+    contacts = message_data.get("contacts", [])
+    campaign_name = message_data.get("campaign_name", "")
+    message_type = message_data.get("message_type", "")
+    
+    # Validate required fields
+    if not contacts:
+        raise HTTPException(status_code=400, detail="Contacts are required")
+    
+    if not campaign_name:
+        raise HTTPException(status_code=400, detail="Campaign name is required")
+    
+    if not message_type:
+        raise HTTPException(status_code=400, detail="Message type is required")
+    
+    # Validate message_type values
+    valid_message_types = ["Text Only", "Text with Media", "Media Only"]
+    if message_type not in valid_message_types:
+        raise HTTPException(status_code=400, detail="Message type must be one of: " + ", ".join(valid_message_types))
+    
+    # Determine message source: template or AI-generated
+    message_source = message_data.get("message_source")
+    
+    if message_source not in ["template", "ai"]:
+        raise HTTPException(status_code=400, detail="Message source must be either 'template' or 'ai'")
+    
+    # Instance selection (optional)
+    instance_id = message_data.get("instance_id")
+    if instance_id:
+        phone_number_id = instance_id
+    else:
+        if not current_user.get('phone_number_id'):
+            raise HTTPException(status_code=400, detail="WhatsApp not connected")
+        phone_number_id = current_user['phone_number_id']
+    
+    if not current_user.get('meta_api_key'):
+        raise HTTPException(status_code=400, detail="WhatsApp API key not found")
+    
+    message_content = ""
     media_url = message_data.get("media_url", "")
     caption = message_data.get("caption", "")
     
+    # Handle different message sources
+    if message_source == "template":
+        # Get message from selected template
+        template_id = message_data.get("template_id")
+        if not template_id:
+            raise HTTPException(status_code=400, detail="Template ID is required when using template source")
+        
+        templates_collection = await get_whatsapp_templates_collection()
+        template = await templates_collection.find_one({
+            "_id": ObjectId(template_id), 
+            "user_id": current_user["_id"]
+        })
+        
+        if not template:
+            raise HTTPException(status_code=404, detail="Template not found")
+        
+        message_content = template.get("content", "")
+        media_url = media_url or template.get("media_url", "")
+        caption = caption or template.get("caption", "")
+        
+    elif message_source == "ai":
+        # For AI, use the PRE-GENERATED message content directly
+        message_content = message_data.get("message_content", "")
+        ai_idea = message_data.get("ai_idea", "")  # Original idea for record keeping
+        
+        if not message_content:
+            raise HTTPException(status_code=400, detail="AI message content is required")
+        
+    # Validation based on message type
+    if not message_content:
+        raise HTTPException(status_code=400, detail="Message content is required")
+    
+    if message_type in ["Text with Media", "Media Only"] and not media_url:
+        raise HTTPException(status_code=400, detail="Media URL is required for media messages")
+    
+    # Process sending messages (same as before)
     results = []
     successful_sends = 0
     failed_sends = 0
     
     for contact in contacts:
         try:
-            # Send message based on type
             if message_type == "Text Only":
                 response = send_whatsapp_message(
-                    phone_number_id=current_user['phone_number_id'],
+                    phone_number_id=phone_number_id,
                     to_number=contact["number"],
                     message=message_content,
                     access_token=current_user['meta_api_key']
                 )
             elif message_type in ["Text with Media", "Media Only"]:
                 response = send_whatsapp_media(
-                    phone_number_id=current_user['phone_number_id'],
+                    phone_number_id=phone_number_id,
                     to_number=contact["number"],
                     media_url=media_url,
                     caption=caption if message_type == "Text with Media" else "",
                     access_token=current_user['meta_api_key']
                 )
             else:
-                # For other types, use text as fallback
                 response = send_whatsapp_message(
-                    phone_number_id=current_user['phone_number_id'],
+                    phone_number_id=phone_number_id,
                     to_number=contact["number"],
                     message=message_content,
                     access_token=current_user['meta_api_key']
@@ -616,29 +763,38 @@ async def send_bulk_message(
             failed_sends += 1
             results.append({"contact": contact["number"], "status": "failed"})
     
-    # Save campaign if name provided
-    if campaign_name:
-        campaigns_collection = await get_whatsapp_campaigns_collection()
-        campaign = {
-            "user_id": current_user["_id"],
-            "name": campaign_name,
-            "type": "broadcast",
-            "status": "completed",
-            "message_type": message_type,
-            "message_content": message_content,
-            "media_url": media_url,
-            "caption": caption,
-            "contacts": contacts,
-            "sent_count": successful_sends,
-            "failed_count": failed_sends,
-            "created_at": datetime.now(timezone.utc)
-        }
-        await campaigns_collection.insert_one(campaign)
+    # Save campaign
+    campaigns_collection = await get_whatsapp_campaigns_collection()
+    campaign = {
+        "user_id": current_user["_id"],
+        "name": campaign_name,
+        "type": "broadcast",
+        "status": "completed",
+        "message_source": message_source,
+        "message_type": message_type,
+        "message_content": message_content,
+        "media_url": media_url,
+        "caption": caption,
+        "template_id": message_data.get("template_id"),
+        "ai_idea": message_data.get("ai_idea"),  # Store original idea
+        "instance_id": instance_id,
+        "contacts": contacts,
+        "sent_count": successful_sends,
+        "failed_count": failed_sends,
+        "created_at": datetime.now(timezone.utc)
+    }
+    await campaigns_collection.insert_one(campaign)
     
     return {
         "success": True,
         "sent_count": successful_sends,
         "failed_count": failed_sends,
+        "message_source": message_source,
+        "instance_used": instance_id,
+        "campaign_name": campaign_name,
+        "message_content": message_content,  
+        "message_type": message_type,        
+        "media_used": media_url if media_url else None,  
         "results": results
     }
 

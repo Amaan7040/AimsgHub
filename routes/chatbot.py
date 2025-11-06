@@ -1,68 +1,51 @@
-from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
 from typing import Optional
-from models.campaigns import ChatTestInput, KnowledgeBaseInput
+from models.campaigns import ChatTestInput
 from services.database import get_users_collection
 from services.auth import get_current_user
-from services.vector_store import create_or_update_vector_store, load_vector_store_safely, close_vector_store, create_advanced_retriever, force_delete_old_vector_stores
+from services.vector_store import load_vector_store_safely, close_vector_store, create_advanced_retriever
 from utils.embeddings import embedding_model
-from utils.file_processing import valid_url
 from config import GROQ_API_KEY
 import logging
 from langchain_groq import ChatGroq
 from langchain_core.prompts import PromptTemplate
 import asyncio
+from bson import ObjectId
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/chatbot", tags=["Chatbot"])
 
 @router.post("/knowledge-base", status_code=200)
 async def upload_knowledge_base(
-    knowledge_file: Optional[UploadFile] = File(None),
-    knowledge_url: Optional[str] = Form(None),
+    knowledge_file: UploadFile = File(...),
     current_user: dict = Depends(get_current_user)
 ):
-    if not knowledge_file and not knowledge_url:
-        raise HTTPException(status_code=400, detail="Either file or URL must be provided")
-    
-    if knowledge_file and knowledge_url:
-        raise HTTPException(status_code=400, detail="Provide either file or URL, not both")
-    
+    """Upload knowledge base file for chatbot - replaces existing one"""
     try:
-        if knowledge_file:
-            if not knowledge_file.filename:
-                raise HTTPException(status_code=400, detail="No file provided")
-            
-            allowed_types = ['.txt', '.pdf', '.docx', '.csv']
-            if not any(knowledge_file.filename.lower().endswith(ext) for ext in allowed_types):
-                raise HTTPException(
-                    status_code=400, 
-                    detail=f"Invalid file type. Supported types: {', '.join(allowed_types)}"
-                )
-            
-            filename = knowledge_file.filename.lower()
-            if filename.endswith('.txt'):
-                file_type = "text"
-            elif filename.endswith('.pdf'):
-                file_type = "pdf"
-            elif filename.endswith('.docx'):
-                file_type = "docx"
-            elif filename.endswith('.csv'):
-                file_type = "csv"
-            else:
-                raise HTTPException(status_code=400, detail="Unsupported file type")
-            
-            user_vs_path = await create_or_update_vector_store(current_user, knowledge_file, file_type)
-            
-        else:
-            if not valid_url(knowledge_url):
-                raise HTTPException(status_code=400, detail="Invalid URL provided")
-            
-            user_vs_path = await create_or_update_vector_store(current_user, knowledge_url, "website")
+        # Validate file type
+        allowed_types = ['.txt', '.pdf', '.docx', '.doc']
+        file_ext = '.' + knowledge_file.filename.lower().split('.')[-1]
         
-        if user_vs_path:
-            return {"message": "Chatbot knowledge base updated successfully with advanced processing."}
-        else:
-            raise HTTPException(status_code=400, detail="Failed to process knowledge base.")
+        if file_ext not in allowed_types:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Invalid file type. Supported types: {', '.join(allowed_types)}"
+            )
+        
+        # Import the knowledge base service
+        from services.knowledge_base_service import update_replace_user_knowledge_base_service
+        
+        users_collection = await get_users_collection()
+        result = await update_replace_user_knowledge_base_service(current_user["_id"], knowledge_file, users_collection)
+        
+        if not result["success"]:
+            raise HTTPException(status_code=400, detail=result["error"])
+        
+        return {
+            "message": "Chatbot knowledge base updated successfully",
+            "documents_processed": result["documents_processed"],
+            "filename": result["filename"]
+        }
             
     except Exception as e:
         logger.error(f"Error processing knowledge base: {str(e)}")
@@ -70,26 +53,32 @@ async def upload_knowledge_base(
 
 @router.post("/activate")
 async def activate_chatbot(current_user: dict = Depends(get_current_user)):
+    """Activate chatbot functionality"""
     users_collection = await get_users_collection()
     await users_collection.update_one(
-        {"_id": current_user["_id"]},
+        {"_id": ObjectId(current_user["_id"])},
         {"$set": {"chatbot_active": True}}
     )
     return {"message": "Chatbot activated successfully.", "status": True}
 
 @router.post("/deactivate")
 async def deactivate_chatbot(current_user: dict = Depends(get_current_user)):
+    """Deactivate chatbot functionality"""
     users_collection = await get_users_collection()
     await users_collection.update_one(
-        {"_id": current_user["_id"]},
+        {"_id": ObjectId(current_user["_id"])},
         {"$set": {"chatbot_active": False}}
     )
     return {"message": "Chatbot deactivated successfully.", "status": False}
 
 @router.get("/status")
 async def get_chatbot_status(current_user: dict = Depends(get_current_user)):
+    """Get current chatbot status"""
     return {
         "chatbot_active": current_user.get("chatbot_active", False),
+        "has_knowledge_base": bool(current_user.get('vector_store_path')),
+        "knowledge_base_file": current_user.get('knowledge_base_file'),
+        "documents_count": current_user.get('documents_count', 0),
         "email": current_user["email"]
     }
 
@@ -98,8 +87,9 @@ async def test_chatbot_query(
     data: ChatTestInput,
     current_user: dict = Depends(get_current_user)
 ):
+    """Test chatbot with a query using knowledge base"""
     if not current_user.get('vector_store_path'):
-        raise HTTPException(status_code=400, detail="No knowledge base available. Please upload documents or a website first.")
+        raise HTTPException(status_code=400, detail="No knowledge base available. Please upload documents first.")
     
     if not current_user.get('chatbot_active', False):
         raise HTTPException(status_code=400, detail="Chatbot is not active. Please activate it first.")
@@ -136,8 +126,8 @@ Instructions:
 - Keep responses concise and helpful
 - Maintain a friendly, professional tone
 
-Note: Do not tell from  ur side that i do not find from theknowledge base provided instead just say an appology message that i do not have that information to that.
-Do not use any vague or introduction message. Also if there is no context then just say that "Sorry, I donot have any information regarding this."
+Note: Do not tell from your side that you did not find the information in the knowledge base. Instead, just say an apology message that you don't have that information.
+Do not use any vague or introduction message. Also if there is no context then just say that "Sorry, I don't have any information regarding this."
 
 Answer:""")
         chain = prompt | chat_model
@@ -155,6 +145,7 @@ Answer:""")
 
 @router.get("/verify-knowledge-base")
 async def verify_knowledge_base(current_user: dict = Depends(get_current_user)):
+    """Verify knowledge base status and content"""
     if not current_user.get('vector_store_path'):
         return {"status": "no_knowledge_base", "message": "No knowledge base configured"}
     
@@ -165,11 +156,13 @@ async def verify_knowledge_base(current_user: dict = Depends(get_current_user)):
             None, load_vector_store_safely, current_user['vector_store_path']
         )
         
-        sample_docs = vector_store.similarity_search("", k=3)
+        sample_docs = vector_store.similarity_search("test", k=3)
         
         return {
             "status": "active",
             "vector_store_path": current_user['vector_store_path'],
+            "knowledge_base_file": current_user.get('knowledge_base_file'),
+            "documents_count": current_user.get('documents_count', 0),
             "sample_documents": [
                 {
                     "content_preview": doc.page_content[:100] + "..." if len(doc.page_content) > 100 else doc.page_content,
@@ -177,7 +170,7 @@ async def verify_knowledge_base(current_user: dict = Depends(get_current_user)):
                 }
                 for doc in sample_docs
             ],
-            "total_documents": vector_store._collection.count()
+            "total_documents": len(sample_docs)  # Approximate count
         }
     except Exception as e:
         return {"status": "error", "message": f"Error loading knowledge base: {str(e)}"}
@@ -185,11 +178,32 @@ async def verify_knowledge_base(current_user: dict = Depends(get_current_user)):
         if vector_store:
             close_vector_store(vector_store)
 
-@router.post("/cleanup-old-knowledge-bases")
-async def cleanup_old_knowledge_bases(current_user: dict = Depends(get_current_user)):
-    try:
-        await force_delete_old_vector_stores(str(current_user['_id']), current_user.get('vector_store_path'))
-        return {"message": "Cleanup of old knowledge bases completed"}
-    except Exception as e:
-        logger.error(f"Error during cleanup: {e}")
-        raise HTTPException(status_code=500, detail=f"Error during cleanup: {str(e)}")
+@router.delete("/clear-knowledge-base")
+async def clear_knowledge_base(current_user: dict = Depends(get_current_user)):
+    """Clear user's knowledge base"""
+    from services.database import get_users_collection
+    import shutil
+    import os
+    
+    users_collection = await get_users_collection()
+    user = await users_collection.find_one({"_id": ObjectId(current_user["_id"])})
+    
+    if user and user.get('vector_store_path'):
+        # Delete vector store files
+        vector_store_dir = os.path.dirname(user['vector_store_path'])
+        if os.path.exists(vector_store_dir):
+            shutil.rmtree(vector_store_dir)
+    
+    # Update user in database
+    await users_collection.update_one(
+        {"_id": ObjectId(current_user["_id"])},
+        {"$unset": {
+            "vector_store_path": "",
+            "knowledge_base_file": "",
+            "knowledge_base_updated": "",
+            "documents_count": "",
+            "chatbot_active": ""
+        }}
+    )
+    
+    return {"success": True, "message": "Knowledge base cleared successfully"}

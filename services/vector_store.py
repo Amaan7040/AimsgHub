@@ -19,11 +19,34 @@ from langchain_classic.retrievers.document_compressors import EmbeddingsFilter #
 from langchain_community.vectorstores.utils import filter_complex_metadata
 
 from utils.embeddings import embedding_model
-from utils.file_processing import load_documents, calculate_dynamic_chunk_size, valid_url
+from utils.file_processing import load_documents, split_documents
 from services.database import get_users_collection
 from config import VECTOR_STORE_DIR, BATCH_SIZE
 
 logger = logging.getLogger(__name__)
+
+def create_vector_store(documents: List[Document], embedding_function):
+    """Create a new vector store from documents"""
+    try:
+        # Create a temporary directory for the vector store
+        vector_store_path = f"temp_vector_store_{uuid.uuid4().hex}"
+        os.makedirs(vector_store_path, exist_ok=True)
+        
+        # Create Chroma vector store
+        vector_store = Chroma.from_documents(
+            documents=documents,
+            embedding=embedding_function,
+            persist_directory=vector_store_path
+        )
+        
+        # Persist the vector store
+        vector_store.persist()
+        
+        return vector_store
+        
+    except Exception as e:
+        logger.error(f"Error creating vector store: {e}")
+        raise
 
 def create_advanced_retriever(vector_store, embedding_model):
     """Create advanced retriever with MMR and contextual compression"""
@@ -134,116 +157,88 @@ def close_vector_store(vector_store):
 
 async def force_delete_old_vector_stores(user_id: str, exclude_current_path: str = None):
     """Force delete all old vector stores for a user except the current one"""
-    user_pattern = f"vs_{user_id}_"
-    current_pattern = f"vs_{user_id}$"
+    user_pattern = f"user_{user_id}"
     
     try:
-        for item in os.listdir(VECTOR_STORE_DIR):
-            item_path = os.path.join(VECTOR_STORE_DIR, item)
-            
-            if exclude_current_path and item_path == exclude_current_path:
-                continue
+        # Look for user directories in vector_stores folder
+        vector_stores_base = "vector_stores"
+        if os.path.exists(vector_stores_base):
+            for item in os.listdir(vector_stores_base):
+                item_path = os.path.join(vector_stores_base, item)
                 
-            if item.startswith(user_pattern) or re.match(current_pattern, item):
-                logger.info(f"Found old vector store to delete: {item_path}")
-                await cleanup_vector_store_resources(item_path)
+                if exclude_current_path and item_path == exclude_current_path:
+                    continue
+                    
+                if item.startswith(user_pattern):
+                    logger.info(f"Found old vector store to delete: {item_path}")
+                    await cleanup_vector_store_resources(item_path)
     except Exception as e:
         logger.error(f"Error during force cleanup of old vector stores: {e}")
 
-async def create_or_update_vector_store(user: dict, knowledge_source: str, source_type: str):
-    """Create or update vector store with proper resource management"""
-    if not knowledge_source:
-        return None
-    
+async def create_or_update_vector_store(user: dict, file):
+    """Create or update vector store from file - simplified version for knowledge base"""
     temp_file_path = None
     vector_store = None
     
     try:
-        timestamp = int(time.time())
-        new_vs_path = os.path.join(VECTOR_STORE_DIR, f"vs_{user['_id']}_{timestamp}")
+        from utils.file_processing import get_file_type, load_documents, split_documents
         
-        loop = asyncio.get_event_loop()
-        if source_type == "website":
-            if not valid_url(knowledge_source):
-                raise HTTPException(status_code=400, detail="Invalid URL provided")
-            
-            documents = await loop.run_in_executor(
-                None, load_documents, "", "website", knowledge_source
-            )
-        else:
-            if hasattr(knowledge_source, 'filename') and hasattr(knowledge_source, 'read'):
-                filename = knowledge_source.filename
-                file_extension = os.path.splitext(filename)[1].lower() if filename else '.txt'
-                
-                with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as temp_file:
-                    content = await knowledge_source.read()
-                    temp_file.write(content)
-                    temp_file_path = temp_file.name
-                
-                documents = await loop.run_in_executor(
-                    None, load_documents, temp_file_path, source_type
-                )
-            else:
-                raise HTTPException(status_code=400, detail="Invalid file upload")
+        # Get file info
+        filename = file.filename
+        file_type = get_file_type(filename)
         
-        if not documents:
-            raise HTTPException(status_code=400, detail="No content found in the source")
+        # Create user directory
+        user_dir = f"vector_stores/user_{user['_id']}"
+        os.makedirs(user_dir, exist_ok=True)
         
-        combined_text = "\n".join([doc.page_content for doc in documents])
-        chunk_size, chunk_overlap = calculate_dynamic_chunk_size(combined_text)
+        # Save file temporarily
+        temp_file_path = f"{user_dir}/temp_{uuid.uuid4().hex}_{filename}"
+        with open(temp_file_path, "wb") as f:
+            content = await file.read()
+            f.write(content)
         
-        logger.info(f"Using dynamic chunking - size: {chunk_size}, overlap: {chunk_overlap}")
+        # Check file size (10MB max)
+        if len(content) > 10 * 1024 * 1024:
+            os.remove(temp_file_path)
+            raise HTTPException(status_code=400, detail="File size exceeds 10MB limit")
         
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            length_function=len
-        )
-        
-        split_docs = text_splitter.split_documents(documents)
+        # Load and process documents
+        documents = load_documents(temp_file_path, file_type)
+        split_docs = split_documents(documents)
         
         if not split_docs:
-            raise HTTPException(status_code=400, detail="No valid documents created after splitting")
+            raise HTTPException(status_code=400, detail="No content could be extracted from the file")
         
-        logger.info(f"Creating NEW vector store at: {new_vs_path}")
-        vector_store = Chroma(
-            persist_directory=new_vs_path,
-            embedding_function=embedding_model
-        )
+        logger.info(f"Processed {filename}: {len(split_docs)} chunks")
         
-        for i in range(0, len(split_docs), BATCH_SIZE):
-            batch = split_docs[i:i + BATCH_SIZE]
-            vector_store.add_documents(batch)
-            logger.info(f"Embedded batch {i//BATCH_SIZE + 1}/{ceil(len(split_docs)/BATCH_SIZE)}")
+        # Create NEW vector store
+        vector_store = create_vector_store(split_docs, embedding_model)
         
-        vector_store.persist()
+        # Save vector store to user directory
+        vector_store_path = f"{user_dir}/vector_store"
+        vector_store.save_local(vector_store_path)
         
+        # Clean up old vector store if exists
         old_vector_store_path = user.get('vector_store_path')
         if old_vector_store_path and os.path.exists(old_vector_store_path):
-            logger.info(f"Scheduling cleanup of old vector store: {old_vector_store_path}")
-            asyncio.create_task(cleanup_vector_store_resources(old_vector_store_path))
-            asyncio.create_task(force_delete_old_vector_stores(str(user['_id']), new_vs_path))
+            logger.info(f"Cleaning up old vector store: {old_vector_store_path}")
+            await cleanup_vector_store_resources(old_vector_store_path)
         
-        # Update user record with NEW path
-        users_collection = await get_users_collection()
-        await users_collection.update_one(
-            {"_id": user["_id"]},
-            {"$set": {"vector_store_path": new_vs_path}}
-        )
-        
-        logger.info(f"Successfully updated vector store. New path: {new_vs_path}")
-        return new_vs_path
+        return vector_store_path, len(split_docs)
         
     except Exception as e:
-        if vector_store:
-            close_vector_store(vector_store)
-        logger.error(f"Error processing knowledge base: {str(e)}")
+        logger.error(f"Error creating/updating vector store: {e}")
         raise HTTPException(status_code=500, detail=f"Error processing knowledge base: {str(e)}")
     finally:
+        # Clean up temp file
         if temp_file_path and os.path.exists(temp_file_path):
             try:
                 os.unlink(temp_file_path)
-                logger.info(f"Cleaned up temporary file: {temp_file_path}")
             except Exception as e:
                 logger.warning(f"Could not delete temporary file {temp_file_path}: {e}")
+        
+        # Clean up vector store resources
+        if vector_store:
+            close_vector_store(vector_store)
+        
         gc.collect()

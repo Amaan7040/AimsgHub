@@ -61,6 +61,11 @@ async def get_refresh_tokens_collection():
     db = await get_database()
     return db.refresh_tokens
 
+async def get_knowledge_base_collection():
+    """Get knowledge base documents collection"""
+    from services.database import mongodb
+    return mongodb.db.knowledge_base_documents
+
 @asynccontextmanager
 async def lifespan_manager(app: FastAPI):
     # Startup
@@ -83,6 +88,11 @@ async def lifespan_manager(app: FastAPI):
         email_users_collection = await get_email_users_collection()
         await email_users_collection.create_index("user_id", unique=True)
         await email_users_collection.create_index("username", unique=True)
+        
+        sms_users_collection = await get_sms_users_collection()
+        await sms_users_collection.create_index("user_id", unique=True)
+        
+        # Removed usage collection indexes
         
         logger.info("MongoDB indexes created successfully")
         
