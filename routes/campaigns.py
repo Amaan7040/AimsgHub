@@ -86,7 +86,7 @@ async def send_bulk_sms_background(numbers: List[str], message: str, user_id: st
 @router.post("/generate-from-idea", status_code=200)
 async def generate_message_from_idea(data: IdeaInput):
     system_prompt = "You are an expert WhatsApp marketing copywriter. Write a short, engaging, and friendly promotional message based on the user's idea. The message must be under 250 characters. Include placeholders like {name} for personalization. The response should only be the marketing message text, without any introductory phrases like 'Here is the message:' or quotes."
-    user_query = f"Generate a WhatsApp marketing message for the following idea: {data.idea}"
+    user_query = f"Generate a WhatsApp marketing message for the following idea: {data.ai_idea}"
     
     generated_text = await call_gemini_api(system_prompt, user_query)
     return {"message": generated_text}
