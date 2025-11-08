@@ -25,3 +25,6 @@ pymupdf
 python-docx
 aiofiles
 httpx
+qrcode[pil]
+pillow
+aiohttp

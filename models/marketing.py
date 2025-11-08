@@ -2,6 +2,7 @@ from pydantic import BaseModel, EmailStr, validator
 import re
 from typing import Optional, List
 from datetime import datetime
+from typing import Literal
 
 # SMS Marketing Models
 class NumberRequest(BaseModel):
@@ -19,7 +20,6 @@ class SMSRequest(BaseModel):
 
 # Email Marketing Models
 class EmailUserCreate(BaseModel):
-    user_id: str
     username: str
     email: EmailStr
 
@@ -33,11 +33,11 @@ class EmailUserUpdate(BaseModel):
     subuser_id: Optional[str] = None
 
 class SendEmailRequest(BaseModel):
-    user_id: str
-    to: EmailStr
+    to: List[EmailStr]
     from_email: EmailStr
     subject: str
     content: str
+    content_type: Literal["text/plain", "text/html"] = "text/html" 
 
 class SubuserCreate(BaseModel):
     username: str
@@ -50,8 +50,9 @@ class DomainCreate(BaseModel):
     username: str
 
 class SendEmailModel(BaseModel):
-    to: EmailStr
+    to: List[EmailStr]
     from_email: EmailStr
     subject: str
     content: str
+    content_type: Literal["text/plain", "text/html"] = "text/html"
     api_key: str

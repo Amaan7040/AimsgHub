@@ -778,6 +778,7 @@ async def send_bulk_message(
         "template_id": message_data.get("template_id"),
         "ai_idea": message_data.get("ai_idea"),  # Store original idea
         "instance_id": instance_id,
+        "template_id": message_data.get("template_id"),
         "contacts": contacts,
         "sent_count": successful_sends,
         "failed_count": failed_sends,
@@ -791,6 +792,7 @@ async def send_bulk_message(
         "failed_count": failed_sends,
         "message_source": message_source,
         "instance_used": instance_id,
+        "template_id": message_data.get("template_id"),
         "campaign_name": campaign_name,
         "message_content": message_content,  
         "message_type": message_type,        

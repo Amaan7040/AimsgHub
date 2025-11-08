@@ -8,7 +8,7 @@ API_KEYS_COLLECTION = "api_keys"
 API_KEY_EXPIRY_HOURS = 3
 API_KEY_AUTO_ROTATE_HOURS = 2.5
 API_KEY_SCOPES = [
-    "whatsapp_marketing", "device_management"
+    "whatsapp_marketing", "device_management", "email_marketing"
 ]
 
 # MongoDB Configuration

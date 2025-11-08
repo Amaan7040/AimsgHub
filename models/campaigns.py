@@ -2,7 +2,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 
 class IdeaInput(BaseModel):
-    idea: str
+    ai_idea: str
 
 class KnowledgeBaseInput(BaseModel):
     url: Optional[str] = None
