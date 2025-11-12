@@ -3,21 +3,49 @@ import re
 from typing import Optional, List
 from datetime import datetime
 from typing import Literal
+from fastapi import UploadFile
 
 # SMS Marketing Models
+class BusinessVerifyRequest(BaseModel):
+    business_name: str
+    business_type: str
+    website: Optional[str] = None
+    business_email: Optional[EmailStr] = None
+
 class NumberRequest(BaseModel):
-    user_id: str
-    phone_number: str
+    area_code: Optional[str] = None
+    admin_phone: str
+
+    @validator('admin_phone')
+    def validate_phone(cls, v):
+        if not re.match(r'^\+?[1-9]\d{1,14}$', v):
+            raise ValueError('Invalid phone number format')
+        return v
 
 class OTPVerifyRequest(BaseModel):
-    user_id: str
     code: str
 
 class SMSRequest(BaseModel):
-    user_id: str
     to_number: str
     message: str
 
+    @validator('to_number')
+    def validate_phone(cls, v):
+        if not re.match(r'^\+?[1-9]\d{1,14}$', v):
+            raise ValueError('Invalid phone number format')
+        return v
+
+class BulkSMSRequest(BaseModel):
+    to_numbers: List[str] = []
+    excel_file: Optional[UploadFile] = None
+    message: str
+
+    @validator('to_numbers', each_item=True)
+    def validate_phones(cls, v):
+        if not re.match(r'^\+?[1-9]\d{1,14}$', v):
+            raise ValueError(f'Invalid phone number format: {v}')
+        return v
+    
 # Email Marketing Models
 class EmailUserCreate(BaseModel):
     username: str

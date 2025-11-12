@@ -1,12 +1,14 @@
+# sms_service.py
 import logging
 from services.database import get_sms_users_collection, get_sms_logs_collection
 from config import twilio_client
 from datetime import datetime, timezone
+from services.api_key_service import APIKeyService
 
 logger = logging.getLogger(__name__)
 
-async def send_sms(req):
-    """Send SMS message"""
+async def send_sms(req, user_id: str):
+    """Send SMS message with user authentication"""
     from models.marketing import SMSRequest
     
     if not isinstance(req, SMSRequest):
@@ -16,7 +18,7 @@ async def send_sms(req):
         raise Exception("Twilio client not configured")
         
     sms_users_collection = await get_sms_users_collection()
-    user = await sms_users_collection.find_one({"user_id": req.user_id})
+    user = await sms_users_collection.find_one({"user_id": user_id})
     
     if not user or not user.get("verified_number"):
         raise Exception("User number not verified")
@@ -31,7 +33,7 @@ async def send_sms(req):
         
         sms_logs_collection = await get_sms_logs_collection()
         await sms_logs_collection.insert_one({
-            "user_id": req.user_id,
+            "user_id": user_id,
             "to_number": req.to_number,
             "message": req.message,
             "sid": message.sid,

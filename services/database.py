@@ -2,7 +2,7 @@ import os
 from motor.motor_asyncio import AsyncIOMotorClient # pyright: ignore[reportMissingImports]
 from contextlib import asynccontextmanager
 import logging
-from config import MONGODB_URI, DATABASE_NAME, USERS_COLLECTION, CAMPAIGNS_COLLECTION, MESSAGE_STATUS_COLLECTION, CHAT_HISTORY_COLLECTION, EMAIL_USERS_COLLECTION, EMAIL_LOGS_COLLECTION, SMS_USERS_COLLECTION, SMS_LOGS_COLLECTION
+from config import MONGODB_URI, DATABASE_NAME, USERS_COLLECTION, CAMPAIGNS_COLLECTION, MESSAGE_STATUS_COLLECTION, CHAT_HISTORY_COLLECTION, EMAIL_USERS_COLLECTION, EMAIL_LOGS_COLLECTION, SMS_USERS_COLLECTION, SMS_LOGS_COLLECTION, BUSINESS_PROFILES_COLLECTION, TWILIO_NUMBERS_COLLECTION
 from fastapi import FastAPI
 
 logger = logging.getLogger(__name__)
@@ -47,6 +47,14 @@ async def get_sms_users_collection():
 async def get_sms_logs_collection():
     db = await get_database()
     return db[SMS_LOGS_COLLECTION]
+
+async def get_business_profiles_collection():
+    db = await get_database()
+    return db[BUSINESS_PROFILES_COLLECTION]
+
+async def get_twilio_numbers_collection():
+    db = await get_database()
+    return db[TWILIO_NUMBERS_COLLECTION]
 
 async def get_api_keys_collection():
     from config import API_KEYS_COLLECTION

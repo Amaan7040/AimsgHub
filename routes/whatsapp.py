@@ -11,6 +11,8 @@ from config import META_API_VERIFY_TOKEN, WHATSAPP_API_URL, GROQ_API_KEY
 from bson import ObjectId
 import requests
 import json
+import pandas as pd
+from io import BytesIO
 import asyncio
 import logging
 from datetime import datetime, timezone
@@ -41,24 +43,11 @@ async def get_whatsapp_contacts_collection():
     from services.database import mongodb
     return mongodb.db.whatsapp_contacts
 
-# WhatsApp Connection & Webhook Routes (Existing) - Keep JWT for these
-def send_whatsapp_message(phone_number_id, to_number, message, access_token):
-    """Send WhatsApp message via Meta API"""
-    if not phone_number_id or not access_token:
-        logger.error("Missing WhatsApp credentials")
-        return None
-        
-    url = f"{WHATSAPP_API_URL}/{phone_number_id}/messages"
-    headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
-    data = {"messaging_product": "whatsapp", "to": to_number, "type": "text", "text": {"body": message}}
-    try:
-        response = requests.post(url, headers=headers, json=data, timeout=10)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error sending WhatsApp message: {e}")
-        return None
+async def get_whatsapp_message_logs_collection():
+    from services.database import mongodb
+    return mongodb.db.whatsapp_message_logs
 
+# WhatsApp Connection & Webhook Routes (Existing) - Keep JWT for these
 @router.get("/connect")
 async def whatsapp_connect(current_user: dict = Depends(get_current_user)):
     """Generate Meta Embedded Signup URL for WhatsApp Business API"""
@@ -636,6 +625,85 @@ async def delete_auto_reply(
     
     return {"success": True}
 
+@router.post("/contacts/process-excel")
+async def process_excel_contacts(
+    file: UploadFile = File(...),
+    current_user: dict = Depends(require_whatsapp_marketing)
+):
+    """Process Excel file and extract contacts - requires whatsapp_marketing key"""
+    try:
+        
+        # Validate file type
+        if not file.filename.lower().endswith(('.xlsx', '.xls')):
+            raise HTTPException(status_code=400, detail="Only Excel files (.xlsx, .xls) are supported")
+        
+        # Read Excel file
+        contents = await file.read()
+        df = pd.read_excel(BytesIO(contents))
+        
+        # Convert column names to lowercase for case-insensitive matching
+        df.columns = df.columns.str.lower()
+        
+        # Find phone number column (check common column names)
+        phone_columns = ['number', 'phone', 'mobile', 'contact', 'phonenumber', 'whatsapp']
+        phone_column = None
+        
+        for col in phone_columns:
+            if col in df.columns:
+                phone_column = col
+                break
+        
+        if not phone_column:
+            raise HTTPException(
+                status_code=400, 
+                detail="Could not find phone number column. Expected column names: " + ", ".join(phone_columns)
+            )
+        
+        # Find name column (optional)
+        name_columns = ['name', 'fullname', 'contactname', 'person']
+        name_column = None
+        
+        for col in name_columns:
+            if col in df.columns:
+                name_column = col
+                break
+        
+        # Extract contacts
+        contacts = []
+        for index, row in df.iterrows():
+            try:
+                phone_number = str(row[phone_column])
+                if pd.notna(phone_number) and phone_number.strip():
+                    contact = {
+                        "number": phone_number.strip(),
+                        "name": str(row[name_column]).strip() if name_column and pd.notna(row[name_column]) else "",
+                        "var1": "",
+                        "var2": "",
+                        "var3": ""
+                    }
+                    contacts.append(contact)
+            except Exception as e:
+                logger.warning(f"Error processing row {index}: {e}")
+                continue
+        
+        if not contacts:
+            raise HTTPException(status_code=400, detail="No valid phone numbers found in the Excel file")
+        
+        return {
+            "success": True,
+            "contacts": contacts,
+            "total_contacts": len(contacts),
+            "file_name": file.filename,
+            "columns_found": {
+                "phone_column": phone_column,
+                "name_column": name_column if name_column else "Not found"
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Error processing Excel file: {e}")
+        raise HTTPException(status_code=500, detail=f"Error processing Excel file: {str(e)}")
+
 # Message Sending
 @router.post("/send-message")
 async def send_bulk_message(
@@ -646,23 +714,25 @@ async def send_bulk_message(
     
     # Extract common fields
     contacts = message_data.get("contacts", [])
+    excel_file_data = message_data.get("excel_contacts", [])  
     campaign_name = message_data.get("campaign_name", "")
     message_type = message_data.get("message_type", "")
     
     # Validate required fields
-    if not contacts:
-        raise HTTPException(status_code=400, detail="Contacts are required")
+    if not contacts and not excel_file_data:
+        raise HTTPException(
+            status_code=400, 
+            detail="Either contacts list or Excel contacts data is required"
+        )
+    
+    if contacts and excel_file_data:
+        raise HTTPException(
+            status_code=400, 
+            detail="Please provide either contacts list OR Excel contacts, not both"
+        )
     
     if not campaign_name:
         raise HTTPException(status_code=400, detail="Campaign name is required")
-    
-    if not message_type:
-        raise HTTPException(status_code=400, detail="Message type is required")
-    
-    # Validate message_type values
-    valid_message_types = ["Text Only", "Text with Media", "Media Only"]
-    if message_type not in valid_message_types:
-        raise HTTPException(status_code=400, detail="Message type must be one of: " + ", ".join(valid_message_types))
     
     # Determine message source: template or AI-generated
     message_source = message_data.get("message_source")
@@ -670,17 +740,132 @@ async def send_bulk_message(
     if message_source not in ["template", "ai"]:
         raise HTTPException(status_code=400, detail="Message source must be either 'template' or 'ai'")
     
+    # Process contacts - use either manual contacts or Excel contacts
+    final_contacts = []
+    
+    if contacts:
+        # Use manually provided contacts
+        final_contacts = contacts
+    elif excel_file_data:
+        # Use Excel uploaded contacts
+        final_contacts = excel_file_data
+    
+    # Validate that we have at least one contact
+    if not final_contacts:
+        raise HTTPException(status_code=400, detail="No valid contacts found")
+    
+    # Validate contact structure
+    validated_contacts = []
+    for contact in final_contacts:
+        if isinstance(contact, dict) and contact.get("number"):
+            validated_contacts.append({
+                "number": str(contact["number"]).strip(),
+                "name": contact.get("name", ""),
+                "var1": contact.get("var1", ""),
+                "var2": contact.get("var2", ""),
+                "var3": contact.get("var3", "")
+            })
+        elif isinstance(contact, str):
+            # If contact is just a string (number), convert to proper format
+            validated_contacts.append({
+                "number": str(contact).strip(),
+                "name": "",
+                "var1": "",
+                "var2": "", 
+                "var3": ""
+            })
+    
+    if not validated_contacts:
+        raise HTTPException(status_code=400, detail="No valid contact numbers found")
+    
+    # ==================== NEW: SAVE CONTACTS TO SEPARATE TABLE ====================
+    try:
+        contacts_collection = await get_whatsapp_contacts_collection()
+        contact_operations = []
+        
+        for contact in validated_contacts:
+            operation = UpdateOne(
+                {
+                    "user_id": current_user["_id"],
+                    "number": contact["number"]
+                },
+                {
+                    "$set": {
+                        "name": contact.get("name", ""),
+                        "var1": contact.get("var1", ""),
+                        "var2": contact.get("var2", ""),
+                        "var3": contact.get("var3", ""),
+                        "country_code": "+91",  # Default country code
+                        "updated_at": datetime.now(timezone.utc)
+                    },
+                    "$setOnInsert": {
+                        "created_at": datetime.now(timezone.utc),
+                        "is_valid": True,
+                        "source": "campaign_upload"
+                    }
+                },
+                upsert=True
+            )
+            contact_operations.append(operation)
+        
+        if contact_operations:
+            contact_result = await contacts_collection.bulk_write(contact_operations, ordered=False)
+            logger.info(f"Saved {len(contact_operations)} contacts to contacts collection")
+    except Exception as e:
+        logger.error(f"Error saving contacts to separate table: {e}")
+        # Don't fail the entire operation if contact saving fails
+    # ==================== END CONTACTS SAVING ====================
+    
+    # For template source, message_type is required
+    if message_source == "template":
+        if not message_type:
+            raise HTTPException(status_code=400, detail="Message type is required when using template source")
+        
+        # Use validate_message_type variable (values remain as-is)
+        validate_message_type = [
+            "Text",
+            "Text with Media", 
+            "Media",
+            "Buttons",
+            "Buttons with Media",
+            "List",
+            "List with Media",
+            "List/Menu",
+            "List/Menu with Media",
+            "Poll",
+            "Poll with Media"
+        ]
+        if message_type not in validate_message_type:
+            raise HTTPException(status_code=400, detail="Message type must be one of: " + ", ".join(validate_message_type))
+    
+    # For AI source, message_type is optional - default to "Text" if not provided
+    elif message_source == "ai":
+        if not message_type:
+            message_type = "" 
+        else:
+            # Still validate if provided, but make it optional
+            validate_message_type = [
+                "Text",
+                "Text with Media",
+                "Media",
+                "Buttons",
+                "Buttons with Media",
+                "List",
+                "List with Media",
+                "List/Menu",
+                "List/Menu with Media",
+                "Poll",
+                "Poll with Media"
+            ]
+            if message_type not in validate_message_type:
+                raise HTTPException(status_code=400, detail="Message type must be one of: " + ", ".join(validate_message_type))
+    
     # Instance selection (optional)
     instance_id = message_data.get("instance_id")
+    phone_number_id = current_user.get('phone_number_id')  # Default to user's phone number ID
+    
     if instance_id:
         phone_number_id = instance_id
-    else:
-        if not current_user.get('phone_number_id'):
-            raise HTTPException(status_code=400, detail="WhatsApp not connected")
-        phone_number_id = current_user['phone_number_id']
-    
-    if not current_user.get('meta_api_key'):
-        raise HTTPException(status_code=400, detail="WhatsApp API key not found")
     
     message_content = ""
     media_url = message_data.get("media_url", "")
@@ -713,61 +898,112 @@ async def send_bulk_message(
         
         if not message_content:
             raise HTTPException(status_code=400, detail="AI message content is required")
-        
+    
     # Validation based on message type
-    if not message_content:
+    if not message_content and message_type not in ["Media"]:
+        # For non-media-only messages, content is required
         raise HTTPException(status_code=400, detail="Message content is required")
     
-    if message_type in ["Text with Media", "Media Only"] and not media_url:
+    if message_type in ["Text with Media", "Media"] and not media_url:
         raise HTTPException(status_code=400, detail="Media URL is required for media messages")
     
-    # Process sending messages (same as before)
+    # ==================== NEW: MESSAGE LOGGING COLLECTION ====================
+    message_logs_collection = await get_whatsapp_message_logs_collection()
+    
+    # Process sending messages
     results = []
     successful_sends = 0
     failed_sends = 0
+    message_logs = []
     
-    for contact in contacts:
+    for contact in validated_contacts:
         try:
-            if message_type == "Text Only":
-                response = send_whatsapp_message(
+            whatsapp_response = None
+            message_status = "failed"
+            error_message = ""
+            
+            # Text-only
+            if message_type == "Text":
+                whatsapp_response = send_whatsapp_message(
                     phone_number_id=phone_number_id,
                     to_number=contact["number"],
                     message=message_content,
                     access_token=current_user['meta_api_key']
                 )
-            elif message_type in ["Text with Media", "Media Only"]:
-                response = send_whatsapp_media(
+            # Media (with or without text)
+            elif message_type in ["Text with Media", "Media"]:
+                # caption used only when there is accompanying text (Text with Media)
+                use_caption = caption if message_type == "Text with Media" else ""
+                whatsapp_response = send_whatsapp_media(
                     phone_number_id=phone_number_id,
                     to_number=contact["number"],
                     media_url=media_url,
-                    caption=caption if message_type == "Text with Media" else "",
+                    caption=use_caption,
                     access_token=current_user['meta_api_key']
                 )
+            # Integration with a proper interactive payload can be added later.
             else:
-                response = send_whatsapp_message(
+                whatsapp_response = send_whatsapp_message(
                     phone_number_id=phone_number_id,
                     to_number=contact["number"],
                     message=message_content,
                     access_token=current_user['meta_api_key']
                 )
             
-            if response:
+            if whatsapp_response:
                 successful_sends += 1
+                message_status = "sent"
                 results.append({"contact": contact["number"], "status": "sent"})
             else:
                 failed_sends += 1
+                message_status = "failed"
+                error_message = "WhatsApp API returned no response"
                 results.append({"contact": contact["number"], "status": "failed"})
                 
         except Exception as e:
             logger.error(f"Failed to send to {contact['number']}: {e}")
             failed_sends += 1
+            message_status = "failed"
+            error_message = str(e)
             results.append({"contact": contact["number"], "status": "failed"})
+        
+        # ==================== NEW: LOG INDIVIDUAL MESSAGE ====================
+        try:
+            log_entry = {
+                "user_id": current_user["_id"],
+                "campaign_name": campaign_name,
+                "contact_number": contact["number"],
+                "contact_name": contact.get("name", ""),
+                "message_content": message_content,
+                "message_type": message_type,
+                "message_source": message_source,
+                "media_url": media_url,
+                "caption": caption,
+                "status": message_status,
+                "error_message": error_message,
+                "instance_id": instance_id,
+                "whatsapp_message_id": whatsapp_response.get("messages")[0]["id"] if whatsapp_response and whatsapp_response.get("messages") else None,
+                "sent_at": datetime.now(timezone.utc),
+                "created_at": datetime.now(timezone.utc)
+            }
+            message_logs.append(log_entry)
+        except Exception as log_error:
+            logger.error(f"Error creating log entry for {contact['number']}: {log_error}")
     
-    # Save campaign
+    # ==================== NEW: BULK INSERT MESSAGE LOGS ====================
+    try:
+        if message_logs:
+            await message_logs_collection.insert_many(message_logs)
+            logger.info(f"Logged {len(message_logs)} individual message records")
+    except Exception as e:
+        logger.error(f"Error saving message logs: {e}")
+    # ==================== END MESSAGE LOGGING ====================
+    
+    # Save campaign and get campaign ID
     campaigns_collection = await get_whatsapp_campaigns_collection()
     campaign = {
         "user_id": current_user["_id"],
-        "name": campaign_name,
+        "campaign_name": campaign_name,
         "type": "broadcast",
         "status": "completed",
         "message_source": message_source,
@@ -776,18 +1012,19 @@ async def send_bulk_message(
         "media_url": media_url,
         "caption": caption,
         "template_id": message_data.get("template_id"),
-        "ai_idea": message_data.get("ai_idea"),  # Store original idea
+        "ai_idea": message_data.get("ai_idea"),
         "instance_id": instance_id,
-        "template_id": message_data.get("template_id"),
-        "contacts": contacts,
+        "contacts": validated_contacts,
         "sent_count": successful_sends,
         "failed_count": failed_sends,
         "created_at": datetime.now(timezone.utc)
     }
-    await campaigns_collection.insert_one(campaign)
+    result = await campaigns_collection.insert_one(campaign)
+    campaign_id = str(result.inserted_id)
     
     return {
         "success": True,
+        "campaign_id": campaign_id,  
         "sent_count": successful_sends,
         "failed_count": failed_sends,
         "message_source": message_source,
@@ -796,8 +1033,14 @@ async def send_bulk_message(
         "campaign_name": campaign_name,
         "message_content": message_content,  
         "message_type": message_type,        
-        "media_used": media_url if media_url else None,  
-        "results": results
+        "media_used": media_url if media_url else None,
+        "contacts_source": "manual" if contacts else "excel",
+        "total_contacts": len(validated_contacts),
+        "results": results,
+        "logging": {
+            "contacts_saved": len(contact_operations) if 'contact_operations' in locals() else 0,
+            "messages_logged": len(message_logs)
+        }
     }
 
 # Statistics and Analytics
@@ -1147,8 +1390,131 @@ async def check_duplicate_contacts(
         "new_contacts": new_contacts
     }
 
+@router.get("/campaign-reports")
+async def get_campaign_reports(
+    current_user: dict = Depends(require_whatsapp_marketing),
+    limit: int = Query(50, ge=1, le=200),
+    skip: int = Query(0, ge=0),
+    status: Optional[str] = Query(None),
+    days: Optional[int] = Query(30, ge=1, le=365)
+):
+    try:
+        campaigns_collection = await get_whatsapp_campaigns_collection()
+        message_logs_collection = await get_whatsapp_message_logs_collection()
+        
+        # Build filter query
+        filter_query = {"user_id": current_user["_id"]}
+        
+        if status:
+            filter_query["status"] = status
+        
+        # Calculate date range if days provided
+        if days:
+            start_date = datetime.now(timezone.utc) - timedelta(days=days)
+            filter_query["created_at"] = {"$gte": start_date}
+        
+        # Get total count for pagination
+        total_count = await campaigns_collection.count_documents(filter_query)
+        
+        # Get campaigns with pagination and sorting (newest first)
+        campaigns_cursor = campaigns_collection.find(filter_query).sort("created_at", -1).skip(skip).limit(limit)
+        campaigns = await campaigns_cursor.to_list(length=limit)
+        
+        logger.info(f"Found {len(campaigns)} campaigns for user {current_user['_id']}")
+        
+        # Format campaigns for the report table
+        formatted_reports = []
+        for campaign in campaigns:
+            try:
+                # Safely convert the document
+                formatted_campaign = safe_convert_document(campaign)
+                
+                # Calculate additional statistics from message logs
+                campaign_stats = await message_logs_collection.aggregate([
+                    {"$match": {
+                        "user_id": current_user["_id"],
+                        "campaign_name": formatted_campaign.get("campaign_name", formatted_campaign.get("name", ""))
+                    }},
+                    {"$group": {
+                        "_id": "$status",
+                        "count": {"$sum": 1}
+                    }}
+                ]).to_list(length=10)
+                
+                # Convert stats to readable format
+                status_counts = {}
+                for stat in campaign_stats:
+                    status_counts[stat["_id"]] = stat["count"]
+                
+                # Get instance information
+                instance_id = formatted_campaign.get("instance_id") or formatted_campaign.get("phone_number_id", "Demo")
+                instance_name = "Demo"  # You can enhance this to get actual instance names
+                
+                # Extract actual phone numbers from contacts
+                contacts = formatted_campaign.get("contacts", [])
+                phone_numbers = []
+                
+                for contact in contacts:
+                    if isinstance(contact, dict) and contact.get("number"):
+                        phone_numbers.append(contact["number"])
+                    elif isinstance(contact, str):
+                        phone_numbers.append(contact)
+                
+                # If no contacts found in campaign, try to get from message logs
+                if not phone_numbers:
+                    message_logs = await message_logs_collection.find({
+                        "user_id": current_user["_id"],
+                        "campaign_name": formatted_campaign.get("campaign_name", formatted_campaign.get("name", ""))
+                    }).limit(10).to_list(length=10)
+                    
+                    phone_numbers = [log.get("contact_number") for log in message_logs if log.get("contact_number")]
+                
+                # Build report entry matching UI table structure
+                report_entry = {
+                    "id": formatted_campaign["_id"],
+                    "name": formatted_campaign.get("campaign_name", formatted_campaign.get("name", "Unnamed Campaign")),
+                    "instance": instance_name,
+                    "instance_id": instance_id,
+                    "numbers": phone_numbers,
+                    "numbers_count": len(phone_numbers), 
+                    "message_type": formatted_campaign.get("message_type", "Text"),
+                    "preview": "No", 
+                    "status": formatted_campaign.get("status", "unknown"),
+                    "created_at": formatted_campaign.get("created_at"),
+                    "sent_count": formatted_campaign.get("sent_count", 0),
+                    "failed_count": formatted_campaign.get("failed_count", 0),
+                    "total_contacts": len(contacts),
+                    "status_breakdown": status_counts,
+                    "message_source": formatted_campaign.get("message_source", "template")
+                }
+                
+                formatted_reports.append(report_entry)
+                
+            except Exception as e:
+                logger.error(f"Error formatting campaign {campaign.get('_id')}: {e}")
+                continue
+        
+        return {
+            "success": True,
+            "campaigns": formatted_reports,
+            "pagination": {
+                "total": total_count,
+                "limit": limit,
+                "skip": skip,
+                "has_more": (skip + limit) < total_count
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in GET /whatsapp/campaign-reports: {str(e)}")
+        logger.exception(e)
+        raise HTTPException(
+            status_code=500, 
+            detail="Internal server error while fetching campaign reports"
+        )
+        
 @router.get("/reports/campaign/{campaign_id}")
-async def get_campaign_report(
+async def get_campaign_report_by_campaign(
     campaign_id: str, 
     current_user: dict = Depends(require_whatsapp_marketing)
 ):
@@ -1167,6 +1533,24 @@ async def get_campaign_report(
     campaign["_id"] = str(campaign["_id"])
     campaign["created_at"] = campaign["created_at"].isoformat() if campaign.get("created_at") else None
     
+    # Build message list with receiver names
+    message_list = []
+    for contact in campaign.get("contacts", [])[:10]:  
+        contact_number = contact.get("number", "")
+        contact_name = contact.get("name", "")
+        
+        message_list.append({
+            "number": contact_number,
+            "name": contact_name, 
+            "instance": "Demo",  
+            "instanceNumber": current_user.get('phone_number_id', ''),
+            "messageType": campaign.get("message_type", "Text"),
+            "preview": "No",
+            "status": "Sent",
+            "createdAt": campaign.get("created_at", ""),
+            "sentAt": campaign.get("created_at", "")
+        })
+    
     return {
         "totalMessages": campaign.get("sent_count", 0) + campaign.get("failed_count", 0),
         "sentMessages": campaign.get("sent_count", 0),
@@ -1176,54 +1560,121 @@ async def get_campaign_report(
         "failedMessages": campaign.get("failed_count", 0),
         "invalidNumbers": 0,
         "nonWhatsappNumbers": 0,
-        "messageList": [
-            {
-                "number": contact.get("number", ""),
-                "instance": "Demo",  # You can store instance info
-                "instanceNumber": current_user.get('phone_number_id', ''),
-                "messageType": campaign.get("message_type", "Text"),
-                "preview": "No",
-                "status": "Sent",
-                "createdAt": campaign.get("created_at", ""),
-                "sentAt": campaign.get("created_at", "")
+        "messageList": message_list
+    }
+
+@router.get("/message-logs")
+async def get_message_logs(
+    current_user: dict = Depends(require_whatsapp_marketing),
+    campaign_name: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    contact_number: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+    skip: int = Query(0, ge=0),
+    days: int = Query(30, ge=1, le=365)
+):
+    """Get detailed message logs with filtering - requires whatsapp_marketing key"""
+    try:
+        message_logs_collection = await get_whatsapp_message_logs_collection()
+        
+        # Build filter query
+        filter_query = {"user_id": current_user["_id"]}
+        
+        if campaign_name:
+            filter_query["campaign_name"] = {"$regex": campaign_name, "$options": "i"}
+        
+        if status:
+            filter_query["status"] = status
+            
+        if contact_number:
+            filter_query["contact_number"] = {"$regex": contact_number, "$options": "i"}
+        
+        # Calculate date range
+        start_date = datetime.now(timezone.utc) - timedelta(days=days)
+        filter_query["sent_at"] = {"$gte": start_date}
+        
+        # Get total count for pagination
+        total_count = await message_logs_collection.count_documents(filter_query)
+        
+        # Get logs with pagination and sorting (newest first)
+        logs_cursor = message_logs_collection.find(filter_query).sort("sent_at", -1).skip(skip).limit(limit)
+        logs = await logs_cursor.to_list(length=limit)
+        
+        # Safely convert all documents
+        formatted_logs = []
+        for log in logs:
+            try:
+                formatted_log = safe_convert_document(log)
+                formatted_logs.append(formatted_log)
+            except Exception as e:
+                logger.error(f"Error converting message log {log.get('_id')}: {e}")
+                continue
+        
+        return {
+            "success": True,
+            "message_logs": formatted_logs,
+            "pagination": {
+                "total": total_count,
+                "limit": limit,
+                "skip": skip,
+                "has_more": (skip + limit) < total_count
             }
-            for contact in campaign.get("contacts", [])[:10]  # Limit for demo
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in GET /whatsapp/message-logs: {str(e)}")
+        raise HTTPException(
+            status_code=500, 
+            detail="Internal server error while fetching message logs"
+        )
+
+@router.get("/message-logs/statistics")
+async def get_message_logs_statistics(
+    current_user: dict = Depends(require_whatsapp_marketing),
+    days: int = Query(30, ge=1, le=365)
+):
+    """Get message logs statistics - requires whatsapp_marketing key"""
+    try:
+        message_logs_collection = await get_whatsapp_message_logs_collection()
+        
+        # Calculate date range
+        start_date = datetime.now(timezone.utc) - timedelta(days=days)
+        
+        pipeline = [
+            {"$match": {"user_id": current_user["_id"], "sent_at": {"$gte": start_date}}},
+            {"$group": {
+                "_id": "$status",
+                "count": {"$sum": 1}
+            }}
         ]
-    }
-
-# Keep existing debug endpoints with JWT for testing
-@router.get("/debug-token")
-async def debug_token(current_user: dict = Depends(get_current_user)):
-    """Debug endpoint to check if token is valid"""
-    return {
-        "status": "Token is valid!",
-        "user_id": str(current_user["_id"]),
-        "email": current_user["email"],
-        "whatsapp_connected": current_user.get("whatsapp_account_verified", False)
-    }
-
-@router.get("/debug-headers")
-async def debug_headers(request: Request):
-    """Debug endpoint to check what headers are received"""
-    headers = dict(request.headers)
-    authorization = request.headers.get("authorization") or request.headers.get("Authorization")
-    api_key = request.headers.get("x-api-key") or request.headers.get("X-API-Key")
-    
-    return {
-        "received_headers": list(headers.keys()),
-        "authorization_header": authorization,
-        "api_key_header": api_key,
-        "content_type": request.headers.get("content-type"),
-        "authorization_parts": authorization.split() if authorization else None
-    }
-
-# New endpoint to test API key validation
-@router.get("/test-api-key")
-async def test_api_key(current_user: dict = Depends(require_whatsapp_marketing)):
-    """Test endpoint to verify API key validation is working"""
-    return {
-        "status": "API key validation successful!",
-        "user_id": str(current_user["_id"]),
-        "email": current_user["email"],
-        "message": "Your API key has the required permissions for all WhatsApp marketing operations."
-    }
+        
+        stats_cursor = await message_logs_collection.aggregate(pipeline).to_list(length=10)
+        
+        # Convert to more readable format
+        status_stats = {}
+        total_messages = 0
+        for stat in stats_cursor:
+            status_stats[stat["_id"]] = stat["count"]
+            total_messages += stat["count"]
+        
+        success_rate = 0
+        if total_messages > 0:
+            success_rate = (status_stats.get("sent", 0) / total_messages) * 100
+        
+        return {
+            "success": True,
+            "statistics": {
+                "total_messages": total_messages,
+                "sent_messages": status_stats.get("sent", 0),
+                "failed_messages": status_stats.get("failed", 0),
+                "success_rate": round(success_rate, 2),
+                "status_breakdown": status_stats
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in GET /whatsapp/message-logs/statistics: {str(e)}")
+        raise HTTPException(
+            status_code=500, 
+            detail="Internal server error while fetching message statistics"
+        )

@@ -8,7 +8,7 @@ API_KEYS_COLLECTION = "api_keys"
 API_KEY_EXPIRY_HOURS = 3
 API_KEY_AUTO_ROTATE_HOURS = 2.5
 API_KEY_SCOPES = [
-    "whatsapp_marketing", "device_management", "email_marketing"
+    "whatsapp_marketing", "device_management", "email_marketing", "sms_marketing"
 ]
 
 # MongoDB Configuration
@@ -45,6 +45,8 @@ EMAIL_USERS_COLLECTION = "email_users"
 EMAIL_LOGS_COLLECTION = "email_logs"
 SMS_USERS_COLLECTION = "sms_users"
 SMS_LOGS_COLLECTION = "sms_logs"
+BUSINESS_PROFILES_COLLECTION = "business_profiles"
+TWILIO_NUMBERS_COLLECTION = "twilio_numbers"
 
 # Initialize clients
 import sendgrid # pyright: ignore[reportMissingImports]
