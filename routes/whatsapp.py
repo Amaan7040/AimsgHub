@@ -4,6 +4,7 @@ from services.auth import get_current_user, validate_api_key
 from services.vector_store import load_vector_store_safely, close_vector_store, create_advanced_retriever
 from services.generate_message import call_gemini_api
 from services.whatsapp_service import send_whatsapp_message, send_whatsapp_media, send_whatsapp_interactive
+from services.database import get_devices_collection
 from models.campaigns import IdeaInput
 from routes.campaigns import generate_message_from_idea
 from utils.embeddings import embedding_model
@@ -734,6 +735,11 @@ async def send_bulk_message(
     if not campaign_name:
         raise HTTPException(status_code=400, detail="Campaign name is required")
     
+    # ==================== NEW: INSTANCE IS NOW COMPULSORY ====================
+    instance_id = message_data.get("instance_id")
+    if not instance_id:
+        raise HTTPException(status_code=400, detail="Instance ID is required for sending messages")
+    
     # Determine message source: template or AI-generated
     message_source = message_data.get("message_source")
     
@@ -778,7 +784,7 @@ async def send_bulk_message(
     if not validated_contacts:
         raise HTTPException(status_code=400, detail="No valid contact numbers found")
     
-    # ==================== NEW: SAVE CONTACTS TO SEPARATE TABLE ====================
+    # ==================== SAVE CONTACTS TO SEPARATE TABLE ====================
     try:
         contacts_collection = await get_whatsapp_contacts_collection()
         contact_operations = []
@@ -814,7 +820,6 @@ async def send_bulk_message(
     except Exception as e:
         logger.error(f"Error saving contacts to separate table: {e}")
         # Don't fail the entire operation if contact saving fails
-    # ==================== END CONTACTS SAVING ====================
     
     # For template source, message_type is required
     if message_source == "template":
@@ -860,12 +865,8 @@ async def send_bulk_message(
             if message_type not in validate_message_type:
                 raise HTTPException(status_code=400, detail="Message type must be one of: " + ", ".join(validate_message_type))
     
-    # Instance selection (optional)
-    instance_id = message_data.get("instance_id")
-    phone_number_id = current_user.get('phone_number_id')  # Default to user's phone number ID
-    
-    if instance_id:
-        phone_number_id = instance_id
+    # Instance selection is now COMPULSORY (already validated above)
+    phone_number_id = instance_id
     
     message_content = ""
     media_url = message_data.get("media_url", "")
@@ -907,7 +908,7 @@ async def send_bulk_message(
     if message_type in ["Text with Media", "Media"] and not media_url:
         raise HTTPException(status_code=400, detail="Media URL is required for media messages")
     
-    # ==================== NEW: MESSAGE LOGGING COLLECTION ====================
+    # ==================== MESSAGE LOGGING COLLECTION ====================
     message_logs_collection = await get_whatsapp_message_logs_collection()
     
     # Process sending messages
@@ -967,7 +968,7 @@ async def send_bulk_message(
             error_message = str(e)
             results.append({"contact": contact["number"], "status": "failed"})
         
-        # ==================== NEW: LOG INDIVIDUAL MESSAGE ====================
+        # ==================== LOG INDIVIDUAL MESSAGE ====================
         try:
             log_entry = {
                 "user_id": current_user["_id"],
@@ -990,7 +991,7 @@ async def send_bulk_message(
         except Exception as log_error:
             logger.error(f"Error creating log entry for {contact['number']}: {log_error}")
     
-    # ==================== NEW: BULK INSERT MESSAGE LOGS ====================
+    # ==================== BULK INSERT MESSAGE LOGS ====================
     try:
         if message_logs:
             await message_logs_collection.insert_many(message_logs)
@@ -1005,7 +1006,7 @@ async def send_bulk_message(
         "user_id": current_user["_id"],
         "campaign_name": campaign_name,
         "type": "broadcast",
-        "status": "completed",
+        "status": "Active",
         "message_source": message_source,
         "message_type": message_type,
         "message_content": message_content,
@@ -1073,7 +1074,7 @@ async def get_statistics_overview(
         "pendingMessages": 0,  # You can calculate based on status
         "activeCampaigns": await campaigns_collection.count_documents({
             "user_id": current_user["_id"], 
-            "status": "active"
+            "status": "Active"
         }),
         "subscribers": 0,  # You might want to track this separately
         "responseRate": 68  # Mock data for now
@@ -1393,8 +1394,6 @@ async def check_duplicate_contacts(
 @router.get("/campaign-reports")
 async def get_campaign_reports(
     current_user: dict = Depends(require_whatsapp_marketing),
-    limit: int = Query(50, ge=1, le=200),
-    skip: int = Query(0, ge=0),
     status: Optional[str] = Query(None),
     days: Optional[int] = Query(30, ge=1, le=365)
 ):
@@ -1413,14 +1412,71 @@ async def get_campaign_reports(
             start_date = datetime.now(timezone.utc) - timedelta(days=days)
             filter_query["created_at"] = {"$gte": start_date}
         
-        # Get total count for pagination
-        total_count = await campaigns_collection.count_documents(filter_query)
-        
-        # Get campaigns with pagination and sorting (newest first)
-        campaigns_cursor = campaigns_collection.find(filter_query).sort("created_at", -1).skip(skip).limit(limit)
-        campaigns = await campaigns_cursor.to_list(length=limit)
+        # Get ALL campaigns without pagination - remove limit and skip
+        campaigns_cursor = campaigns_collection.find(filter_query).sort("created_at", -1)
+        campaigns = await campaigns_cursor.to_list(length=None)  # None means all documents
         
         logger.info(f"Found {len(campaigns)} campaigns for user {current_user['_id']}")
+        
+        # Get user's devices/instances to map instance_id to instance name
+        devices_collection = await get_devices_collection()
+        user_devices = await devices_collection.find({"user_id": current_user["_id"]}).to_list(length=100)
+        device_map = {str(device["_id"]): device.get("name", f"Device {str(device['_id'])[-6:]}") for device in user_devices}
+        
+        # ==================== CALCULATE OVERALL STATISTICS ====================
+        # Use the same campaigns for overall stats (no need to query again)
+        all_campaigns = campaigns
+        
+        # Calculate overall statistics
+        total_messages = 0
+        sent_messages = 0
+        failed_messages = 0
+        pending_messages = 0
+        paused_messages = 0
+        cancelled_messages = 0
+        invalid_numbers = 0
+        non_whatsapp_numbers = 0
+        
+        for camp in all_campaigns:
+            total_messages += camp.get("sent_count", 0) + camp.get("failed_count", 0)
+            sent_messages += camp.get("sent_count", 0)
+            failed_messages += camp.get("failed_count", 0)
+        
+        # Calculate additional statistics from message logs for better accuracy
+        message_logs_stats = await message_logs_collection.aggregate([
+            {"$match": {"user_id": current_user["_id"]}},
+            {"$group": {
+                "_id": "$status",
+                "count": {"$sum": 1}
+            }}
+        ]).to_list(length=20)
+        
+        # Convert message logs stats to a dictionary
+        logs_stats_dict = {}
+        for stat in message_logs_stats:
+            logs_stats_dict[stat["_id"]] = stat["count"]
+        
+        # Use message logs data for more accurate counts
+        sent_messages = logs_stats_dict.get("sent", sent_messages)
+        failed_messages = logs_stats_dict.get("failed", failed_messages)
+        pending_messages = logs_stats_dict.get("pending", 0)
+        paused_messages = logs_stats_dict.get("paused", 0)
+        cancelled_messages = logs_stats_dict.get("cancelled", 0)
+        
+        # For invalid and non-whatsapp, we can check error messages in logs
+        invalid_logs = await message_logs_collection.count_documents({
+            "user_id": current_user["_id"],
+            "error_message": {"$regex": "invalid|Invalid", "$options": "i"}
+        })
+        non_whatsapp_logs = await message_logs_collection.count_documents({
+            "user_id": current_user["_id"], 
+            "error_message": {"$regex": "whatsapp|WhatsApp", "$options": "i"}
+        })
+        
+        invalid_numbers = invalid_logs
+        non_whatsapp_numbers = non_whatsapp_logs
+        
+        total_messages = sent_messages + failed_messages + pending_messages + paused_messages + cancelled_messages
         
         # Format campaigns for the report table
         formatted_reports = []
@@ -1429,7 +1485,7 @@ async def get_campaign_reports(
                 # Safely convert the document
                 formatted_campaign = safe_convert_document(campaign)
                 
-                # Calculate additional statistics from message logs
+                # Calculate additional statistics from message logs for this campaign
                 campaign_stats = await message_logs_collection.aggregate([
                     {"$match": {
                         "user_id": current_user["_id"],
@@ -1446,9 +1502,16 @@ async def get_campaign_reports(
                 for stat in campaign_stats:
                     status_counts[stat["_id"]] = stat["count"]
                 
-                # Get instance information
-                instance_id = formatted_campaign.get("instance_id") or formatted_campaign.get("phone_number_id", "Demo")
-                instance_name = "Demo"  # You can enhance this to get actual instance names
+                # Get instance information - use device name instead of ID
+                instance_id = formatted_campaign.get("instance_id")
+                instance_name = ""  # Default to empty
+                
+                # Map instance_id to device name
+                if instance_id:
+                    instance_name = device_map.get(instance_id, "")
+                    # If still no name, create a fallback
+                    if not instance_name:
+                        instance_name = f"Instance: {instance_id[:8]}..." if len(instance_id) > 10 else f"Instance: {instance_id}"
                 
                 # Extract actual phone numbers from contacts
                 contacts = formatted_campaign.get("contacts", [])
@@ -1473,8 +1536,8 @@ async def get_campaign_reports(
                 report_entry = {
                     "id": formatted_campaign["_id"],
                     "name": formatted_campaign.get("campaign_name", formatted_campaign.get("name", "Unnamed Campaign")),
-                    "instance": instance_name,
-                    "instance_id": instance_id,
+                    "instance": instance_name,  # Now shows device name instead of ID
+                    "instance_id": instance_id,  # Keep ID for reference
                     "numbers": phone_numbers,
                     "numbers_count": len(phone_numbers), 
                     "message_type": formatted_campaign.get("message_type", "Text"),
@@ -1494,15 +1557,23 @@ async def get_campaign_reports(
                 logger.error(f"Error formatting campaign {campaign.get('_id')}: {e}")
                 continue
         
+        # Build overall statistics object matching your image structure
+        overall_statistics = {
+            "totalMessages": total_messages,
+            "cancelled": cancelled_messages,
+            "sent": sent_messages,
+            "pending": pending_messages,
+            "paused": paused_messages,
+            "failed": failed_messages,
+            "invalid": invalid_numbers,
+            "nonWhatsapp": non_whatsapp_numbers
+        }
+        
         return {
             "success": True,
             "campaigns": formatted_reports,
-            "pagination": {
-                "total": total_count,
-                "limit": limit,
-                "skip": skip,
-                "has_more": (skip + limit) < total_count
-            }
+            "overall_statistics": overall_statistics,
+            "total_campaigns": len(formatted_reports)
         }
         
     except Exception as e:
@@ -1529,9 +1600,25 @@ async def get_campaign_report_by_campaign(
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
     
+    # Get user's devices/instances to map instance_id to instance name
+    devices_collection = await get_devices_collection()
+    user_devices = await devices_collection.find({"user_id": current_user["_id"]}).to_list(length=100)
+    device_map = {str(device["_id"]): device.get("name", f"Device {str(device['_id'])[-6:]}") for device in user_devices}
+    
     # Format campaign for frontend
     campaign["_id"] = str(campaign["_id"])
     campaign["created_at"] = campaign["created_at"].isoformat() if campaign.get("created_at") else None
+    
+    # Get instance information - use device name instead of ID
+    instance_id = campaign.get("instance_id")
+    instance_name = ""  
+    
+    # Map instance_id to device name
+    if instance_id:
+        instance_name = device_map.get(instance_id, "")
+        # If still no name, create a fallback
+        if not instance_name:
+            instance_name = f"Instance: {instance_id[:8]}..." if len(instance_id) > 10 else f"Instance: {instance_id}"
     
     # Build message list with receiver names
     message_list = []
@@ -1542,8 +1629,8 @@ async def get_campaign_report_by_campaign(
         message_list.append({
             "number": contact_number,
             "name": contact_name, 
-            "instance": "Demo",  
-            "instanceNumber": current_user.get('phone_number_id', ''),
+            "instance": instance_name,  
+            "instanceNumber": instance_id,  
             "messageType": campaign.get("message_type", "Text"),
             "preview": "No",
             "status": "Sent",

@@ -74,6 +74,11 @@ async def get_knowledge_base_collection():
     from services.database import mongodb
     return mongodb.db.knowledge_base_documents
 
+async def get_devices_collection():
+    """Get devices collection for instance mapping"""
+    db = await get_database()
+    return db.devices
+
 @asynccontextmanager
 async def lifespan_manager(app: FastAPI):
     # Startup
